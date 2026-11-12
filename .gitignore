@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.so
+
+# Data / runtime (sqlite, json state, backups)
+server/data/
+
+# Nginx logs
+nginx/logs/
+
+# Reference binaries (1Panel installation package, too large / not our code)
+ref/1panel-pkg.tar.gz
+ref/1panel-v2.4.2-linux-amd64/
+ref/assets/
+ref/carved/
+ref/core/
+
+# OS
+.DS_Store
+Thumbs.db
