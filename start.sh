@@ -9,7 +9,8 @@ docker ps --format '{{.Names}}' | grep -qx fleet-nginx || {
     -v /home/yy/fleet-panel/server/data:/home/yy/fleet-panel/server/data:ro \
     nginx:alpine
 }
-pgrep -f "app.py --port 8890" >/dev/null || {
+# 精确匹配: pgrep -f 会匹配到引用了该字符串的其他进程(shell 包装/脚本自身), 造成自匹配假阳性
+pgrep -f "^python3 app\.py --port 8890$" >/dev/null || {
   echo "[start] 启动面板"
   FLEET_NGINX_BIND=192.168.1.250 setsid nohup python3 app.py --port 8890 \
     > /tmp/fleet-panel.log 2>&1 < /dev/null & disown

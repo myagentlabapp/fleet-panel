@@ -22,16 +22,25 @@ DB = os.path.join(DATA, "fleet.db")
 os.makedirs(DATA, exist_ok=True)
 
 # ---------- Docker 网关 (通过 docker.sock / CLI) ----------
-def _docker(args, timeout=40):
-    """返回 (ok, text)。优先走 unix socket, 失败回退命令行。"""
-    base = ["docker"]
-    # 若 python 装了 docker 库可走 socket; 这里用 CLI 兼容最广
-    try:
-        r = _sp.run(base + args, capture_output=True, text=True, timeout=timeout)
-        out = (r.stdout + r.stderr).strip()
-        return (r.returncode == 0, out)
-    except Exception as e:
-        return (False, f"ERR {e}")
+def _docker(args, timeout=40, host=""):
+    """返回 (ok, text)。host 空 = 本机(行为与历史完全一致); host 非空 = 走 SSH 在远端节点执行。
+    远端复用 term_run 的免密通道(fleet_ed25519), 命令整体 base64 包裹防引号拆坏。"""
+    if not host or host in ("", "this", "home-4c31g", socket.gethostname()):
+        base = ["docker"]
+        # 若 python 装了 docker 库可走 socket; 这里用 CLI 兼容最广
+        try:
+            r = _sp.run(base + args, capture_output=True, text=True, timeout=timeout)
+            out = (r.stdout + r.stderr).strip()
+            return (r.returncode == 0, out)
+        except Exception as e:
+            return (False, f"ERR {e}")
+    # 远端: docker <args> 打包成 base64 脚本, 超时放宽 5s(SSH 握手开销)
+    payload = "docker " + " ".join(_shq(a) for a in args)
+    wrapped = "echo %s | base64 -d | bash" % __import__("base64").b64encode(payload.encode()).decode()
+    r = term_run(host, wrapped, sudo=False)
+    if not r.get("done"):
+        return (False, r.get("msg") or f"节点 {host} 不可达")
+    return (r.get("rc", 1) == 0, str(r.get("out", "")).strip())
 
 def _shq(s):
     """POSIX shell 单引号转义(容器内路径参数用)。"""
@@ -4150,6 +4159,164 @@ def make_app():
         if not h: return jsonify({"error":"no host"}), 404
         ev = c.execute("SELECT at,level,msg FROM events WHERE host=? ORDER BY at DESC LIMIT 20", (host,)).fetchall()
         return jsonify({"host": list(h), "events": ev})
+
+    # ---- T6: 跨机执行层端点 (统一走 _docker/term_run 的 SSH 通道, base64 包裹) ----
+    def _host_or_404(host):
+        """校验节点存在, 返回 (row, None) 或 (None, jsonify响应)。"""
+        c = db()
+        h = c.execute("SELECT name,ip FROM hosts WHERE name=? OR ip=?", (host, host)).fetchone()
+        if not h:
+            return None, (jsonify({"ok": False, "error": f"节点 {host} 未纳管"}), 404)
+        return h, None
+
+    @app.get("/api/hosts/<h>/docker")
+    def api_host_docker(h):
+        """远端容器列表: ps -a + inspect 网络(两次 SSH, 无 stats——远端 stats 要 3s+ 阻塞)。"""
+        if not need_auth(): return jsonify({"error":"unauth"}), 401
+        row, err = _host_or_404(h)
+        if err: return err
+        name = row[0]
+        ok, out = _docker(["ps", "-a", "--no-trunc", "--format",
+            "{{.ID}}|{{.Names}}|{{.Image}}|{{.State}}|{{.Status}}|{{.Ports}}|{{.RunningFor}}"], host=name)
+        if not ok:
+            return jsonify({"ok": False, "error": out, "containers": []})
+        rows = []
+        for line in out.splitlines():
+            p = line.split("|")
+            if len(p) < 7: continue
+            rows.append({"id": p[0][:12], "name": p[1], "image": p[2],
+                         "state": p[3], "status": p[4], "ports": _split_ports(p[5]),
+                         "running": p[6]})
+        ok2, out2 = _docker(["inspect", "--format",
+            "{{.Name}}|{{index .Config.Labels \"com.docker.compose.project\"}}|"
+            "{{range $k,$v := .NetworkSettings.Networks}}{{$v.IPAddress}} {{end}}"] +
+            [r["id"] for r in rows], host=name)
+        if ok2:
+            for line in out2.splitlines():
+                if "|" not in line: continue
+                p = line.split("|", 2)
+                if len(p) < 3: continue
+                nm = p[0].lstrip("/")
+                for r in rows:
+                    if r["name"] == nm:
+                        r["ips"] = [x for x in p[2].split() if x]
+                        r["compose"] = bool(p[1].strip() and p[1].strip() != "<no value>")
+        return jsonify({"ok": True, "host": name, "containers": rows})
+
+    @app.post("/api/hosts/<h>/docker/<cid>/<op>")
+    def api_host_docker_action(h, cid, op):
+        """远端容器操作: start/stop/restart/kill/pause/unpause。"""
+        if not need_auth(): return jsonify({"error":"unauth"}), 401
+        row, err = _host_or_404(h)
+        if err: return err
+        if op not in _DOCKER_OPS:
+            return jsonify({"ok": False, "error": "unknown op"})
+        ok, out = _docker(_DOCKER_OPS[op] + [cid], host=row[0], timeout=60)
+        return jsonify({"ok": ok, "error": "" if ok else out, "out": out})
+
+    @app.get("/api/hosts/<h>/docker/<cid>/logs")
+    def api_host_docker_logs(h, cid):
+        if not need_auth(): return jsonify({"error":"unauth"}), 401
+        row, err = _host_or_404(h)
+        if err: return err
+        tail = min(2000, request.args.get("tail", 200, type=int))
+        ok, out = _docker(["logs", "--tail", str(tail), "--timestamps", cid], host=row[0])
+        return jsonify({"ok": ok, "error": "" if ok else out, "out": out})
+
+    @app.get("/api/hosts/<h>/nginx")
+    def api_host_nginx(h):
+        """远端 nginx 站点列表 + nginx -t 测试结果。"""
+        if not need_auth(): return jsonify({"error":"unauth"}), 401
+        row, err = _host_or_404(h)
+        if err: return err
+        name = row[0]
+        sh = (
+            "for d in /etc/nginx/sites-enabled /etc/nginx/conf.d; do\n"
+            "  [ -d \"$d\" ] && ls -1 \"$d\" 2>/dev/null | sed \"s|^|$d/|\"\n"
+            "done\n"
+            "echo '---TEST'\n"
+            "nginx -t 2>&1 || true\n"
+        )
+        wrapped = "echo %s | base64 -d | bash" % __import__("base64").b64encode(sh.encode()).decode()
+        r = term_run(name, wrapped)
+        if not r.get("done"):
+            return jsonify({"ok": False, "error": r.get("msg") or "SSH 不可达", "sites": [], "test": ""})
+        out = str(r.get("out", ""))
+        confs, test = [], ""
+        if "---TEST" in out:
+            confs_txt, test = out.split("---TEST", 1)
+            test = test.strip()
+        else:
+            confs_txt = out
+        for line in confs_txt.strip().splitlines():
+            line = line.strip()
+            if line: confs.append(line)
+        return jsonify({"ok": True, "host": name, "sites": confs, "test": test})
+
+    @app.get("/api/hosts/<h>/certs")
+    def api_host_certs(h):
+        """远端证书清单: 常见目录下 *.pem/*.crt 的 subject/notAfter(openssl 逐个读)。"""
+        if not need_auth(): return jsonify({"error":"unauth"}), 401
+        row, err = _host_or_404(h)
+        if err: return err
+        name = row[0]
+        sh = (
+            "for d in /etc/nginx/ssl /etc/nginx/ssl/wildcard /etc/letsencrypt/live"
+            " $HOME/.acme.sh /root/.acme.sh; do\n"
+            "  [ -d \"$d\" ] || continue\n"
+            "  find \"$d\" -maxdepth 3 \\( -name '*.pem' -o -name '*.crt' -o -name '*.cer' \\) 2>/dev/null\n"
+            "done | sort -u | head -100 | while read -r f; do\n"
+            "  # ssh/bash 组合会把 \$() 换行折成空格, 用 tr 自行造分隔符再拆\n"
+            "  info=$(openssl x509 -in \"$f\" -noout -subject -enddate 2>/dev/null | tr '\\n' '\\x01') || continue\n"
+            "  [ -n \"$info\" ] || continue\n"
+            "  subj=$(printf '%s' \"$info\" | tr '\\x01' '\\n' | grep '^subject=' | sed 's/^subject=//')\n"
+            "  end=$(printf '%s' \"$info\"  | tr '\\x01' '\\n' | grep '^notAfter=' | cut -d= -f2-)\n"
+            "  echo \"$f|$subj|$end\"\n"
+            "done\n"
+        )
+        wrapped = "echo %s | base64 -d | bash" % __import__("base64").b64encode(sh.encode()).decode()
+        r = term_run(name, wrapped)
+        if not r.get("done"):
+            return jsonify({"ok": False, "error": r.get("msg") or "SSH 不可达", "certs": []})
+        rows = []
+        for line in str(r.get("out", "")).strip().splitlines():
+            p = line.split("|")
+            if len(p) == 3 and p[0]:
+                rows.append({"path": p[0], "subject": p[1], "not_after": p[2]})
+        return jsonify({"ok": True, "host": name, "certs": rows})
+
+    @app.get("/api/hosts/<h>/disk")
+    def api_host_disk(h):
+        """远端磁盘: df -P 全挂载 + lsblk(含未挂载盘/分区)。"""
+        if not need_auth(): return jsonify({"error":"unauth"}), 401
+        row, err = _host_or_404(h)
+        if err: return err
+        name = row[0]
+        sh = (
+            "echo '---DF'\n"
+            "df -P -x tmpfs -x devtmpfs -x squashfs 2>/dev/null\n"
+            "echo '---LSBLK'\n"
+            "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT --pairs 2>/dev/null || lsblk 2>/dev/null\n"
+        )
+        wrapped = "echo %s | base64 -d | bash" % __import__("base64").b64encode(sh.encode()).decode()
+        r = term_run(name, wrapped)
+        if not r.get("done"):
+            return jsonify({"ok": False, "error": r.get("msg") or "SSH 不可达", "df": [], "lsblk": ""})
+        out = str(r.get("out", ""))
+        dfrows, lsblk = [], ""
+        try:
+            df_txt, lsblk = out.split("---LSBLK", 1)
+            df_txt = df_txt.replace("---DF", "").strip()
+            lsblk = lsblk.strip()
+        except ValueError:
+            df_txt = out
+        lines = [l for l in df_txt.splitlines() if l.strip()]
+        for l in lines[1:]:   # 跳过表头
+            p = l.split()
+            if len(p) >= 6:
+                dfrows.append({"fs": p[0], "size": p[1], "used": p[2], "avail": p[3],
+                               "pct": p[4], "mount": p[5]})
+        return jsonify({"ok": True, "host": name, "df": dfrows, "lsblk": lsblk})
 
     @app.get("/api/overview")
     def api_overview():
@@ -10956,6 +11123,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
        <div class="content-container__title">
         <div class="ck-left"><a class="btn" onclick="ckCreate()">创建</a><a class="btn ghost" onclick="ckImport()">导入</a><a class="btn ghost" onclick="ckPrune('containers')">清理容器</a></div>
         <div class="ck-right">
+         <select class="sel" id=ck-node style="height:30px;margin-right:8px" onchange="CK_NODE=this.value;dload()" title="选择节点"><option value="">本机 (home-4c31g)</option></select>
          <div class="el-radio-group">
           <label class="el-radio-button el-radio-button--default el-tooltip__trigger" title="卡片视图"><input class="el-radio-button__original-radio" type="radio"><span class="el-radio-button__inner"><svg class="vi" viewBox="0 0 1024 1024"><path fill="currentColor" d="M640 384v256H384V384h256zm64 0h192v256H704V384zm-64 512H384V704h256v192zm64 0V704h192v192H704zm-64-768v192H384V128h256zm64 0h192v192H704V128zM320 384v256H128V384h192zm0 512H128V704h192v192zm0-768v192H128V128h192z"/></svg></span></label>
           <label class="el-radio-button is-active el-radio-button--default el-tooltip__trigger" title="表格视图"><input class="el-radio-button__original-radio" type="radio" checked><span class="el-radio-button__inner"><svg class="vi" viewBox="0 0 1024 1024"><path fill="currentColor" d="M704 192h160v736H160V192h160v64h384v-64zM288 512h448v-64H288v64zm0 256h448v-64H288v64zm96-576V96h256v96H384z"/></svg></span></label>
@@ -15367,6 +15535,19 @@ function sum_(ok,warn,crit,off){
 /* ===== 容器模块 (对标 1Panel /containers/*) ===== */
 const CK_TABS=['dashboard','container','compose','image','network','volume','repo','template','setting'];
 let _ckTimer=null,_ckFilter='all';
+let CK_NODE='';   // 节点选择器: 空 = 本机; 非空 = hosts 表节点名(走 /api/hosts/<n>/docker)
+let _ckNodesLoaded=false;
+async function ckLoadNodes(){
+ if(_ckNodesLoaded)return;
+ const sel=document.getElementById('ck-node');if(!sel)return;
+ try{
+  const r=await fetch('/api/hosts');const d=await r.json();
+  (d||[]).forEach(h=>{const o=document.createElement('option');o.value=h.name;o.textContent=h.name;sel.appendChild(o)});
+ }catch(e){}
+ _ckNodesLoaded=true;
+ if(CK_NODE)sel.value=CK_NODE;
+}
+ckLoadNodes();
 function ckSb(){
  const sc=document.querySelector('#ck-pane-container .tblscroll');if(!sc)return;
  const v=document.getElementById('ck-sb-v'),h=document.getElementById('ck-sb-h');if(!v||!h)return;
@@ -15520,7 +15701,9 @@ async function ckPrune(what){
 }
 /* ---- 容器 ---- */
 async function dload(){
- const r=await fetch('/api/docker/containers');const d=await r.json();
+ const base=CK_NODE?('/api/hosts/'+encodeURIComponent(CK_NODE)+'/docker'):'/api/docker/containers';
+ const r=await fetch(base);const d=await r.json();
+ if(!d.ok&&d.error){const el=document.getElementById('dbody');if(el)el.innerHTML='<tr><td colspan="9" style="padding:20px;color:#f56c6c">'+(d.error||'加载失败')+'</td></tr>';return;}
  const all=d.containers||[];
  const run=all.filter(c=>c.state=='running');
  const a=document.getElementById('ckt-all'),b=document.getElementById('ckt-run');
@@ -15788,7 +15971,7 @@ async function ckBatchOp(){
  const ids=ckSelIds();if(!ids.length){toast('请先勾选容器');return}
  const op=prompt('批量操作（start/stop/restart/remove）','start');if(!op)return;
  if(!['start','stop','restart','remove'].includes(op)){toast('不支持的操作: '+op);return}
- for(const id of ids)await _ckPost('/api/docker/'+id+'/'+op);
+ const pre=CK_NODE?('/api/hosts/'+encodeURIComponent(CK_NODE)+'/docker/'):'/api/docker/'; for(const id of ids)await _ckPost(pre+id+'/'+op);
  dload();}
 function ckSize(){toast('正在获取容器大小…');_ckPost('/api/docker/size').then(d=>{
  if(d&&d.ok===false){toast('获取失败: '+(d.error||''));return}
@@ -18051,8 +18234,8 @@ function certDetailDrawer(domain){
  termDrawer('证书详情 · '+domain,body,'');
 }
 // ---- 容器操作 ----
-async function dact(cid,op){if(!confirm(op+' '+cid))return;await fetch('/api/docker/'+cid+'/'+op,{method:'POST',headers:{'X-Fleet-Token':TOK}});dload();}
-async function dlogs(cid,name){const r=await fetch('/api/docker/'+cid+'/logs');const d=await r.json();
+async function dact(cid,op){if(!confirm(op+' '+cid))return;const u=CK_NODE?('/api/hosts/'+encodeURIComponent(CK_NODE)+'/docker/'+cid+'/'+op):('/api/docker/'+cid+'/'+op);await fetch(u,{method:'POST',headers:{'X-Fleet-Token':TOK}});dload();}
+async function dlogs(cid,name){const u=CK_NODE?('/api/hosts/'+encodeURIComponent(CK_NODE)+'/docker/'+cid+'/logs'):('/api/docker/'+cid+'/logs');const r=await fetch(u);const d=await r.json();
  prompt(name+' 日志(尾部):',(d.out||d.error||'').slice(-1800));}
 // ---- 多机管理 (node dashboard, 对标本机挂载) ----
 const NODES={tab:'overview',cur:'主节点',hosts:[],dbtype:''};
