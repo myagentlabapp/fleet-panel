@@ -140,7 +140,7 @@ def _docker(args, timeout=40, host=""):   # host 空 = 本机，行为完全不�
 #### [x] T7 · 前端节点选择器（2026-11-14 完成）
 - [x] 容器页工具栏加 `ck-node` 下拉（本机 + /api/hosts 全部节点）
 - [x] 切换后 `dload()`/`dact`/`dlogs`/`ckBatchOp` 全部走 `/api/hosts/<n>/docker` 路由；切回本机走原 `/api/docker/*`，行为不变
-- [~] 站点/证书页的节点切换：端点已就绪，前端页面接线待 P3 逐台接入时一并做（端点先行，页面随接入验证）
+- [x] 站点/证书页的节点切换：2026-11-15 接线完成 —— 站点页 s-node 走 /api/hosts/<n>/nginx 只读展示，证书页 c-node 走 /api/hosts/<n>/certs 只读展示；本机行为不变
 
 #### [x] T8 · 首个验证对象 = xian-8c8g-a（2026-11-14 通过）
 - [x] 面板 `/api/hosts/xian-8c8g-a/docker` 列出全部 **12 个容器**，名称与 `docker ps` 一致（sso-center/new-api-prod/tokenhub-web/admin-hub/tokenhub/agentlab-reaper/agentlab-proxy/agent-frontend/agentlab-backend/pg-unified/pgbouncer/lldap-platform），含远端 inspect 的 IP 与 compose 标记
