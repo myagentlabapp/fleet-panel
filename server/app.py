@@ -2607,8 +2607,8 @@ def make_app():
 
     @app.get("/favicon.ico")
     def favicon():
-        # 返回品牌 SVG favicon，浏览器地址栏/标签页显示面板 Logo
-        return send_from_directory(os.path.join(os.path.dirname(__file__), "..", "static", "svg"), "favicon.svg", mimetype="image/svg+xml")
+        # 返回品牌 ICO favicon，浏览器地址栏/标签页显示面板 Logo
+        return send_from_directory(os.path.join(os.path.dirname(__file__), "..", "static", "svg"), "favicon.ico", mimetype="image/x-icon")
 
     @app.get("/assets/svg/<path:filename>")
     def assets_svg(filename):
@@ -8195,7 +8195,7 @@ def make_app():
 
 HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>1Panel</title>
-<link rel="icon" href="/favicon.ico" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
  :root{
