@@ -11274,7 +11274,8 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
           <label class="el-radio-button el-radio-button--default" title="卡片模式" onclick="sitesMode('card',this)"><input class="el-radio-button__original-radio" type="radio" value="card"><span class="el-radio-button__inner"><i class="el-icon"><svg class="svg-icon"><use xlink:href="#p-grid"></use></svg></i></span></label>
           <label class="el-radio-button is-active el-radio-button--default" title="列表模式" onclick="sitesMode('table',this)"><input class="el-radio-button__original-radio" type="radio" value="table"><span class="el-radio-button__inner"><i class="el-icon"><svg class="svg-icon"><use xlink:href="#p-list"></use></svg></i></span></label>
          </div>
-         <div class="el-select el-select--default p-w-200"><div class="el-select__wrapper"><div class="el-select__prefix">类型</div><select id=sf-type class="el-select__native" onchange="sload()"><option value="">请选择</option><option>反向代理</option><option>静态</option><option>应用</option></select><div class="el-select__suffix"><i class="el-icon el-select__caret el-select__icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="M831.872 340.864 512 652.672 192.128 340.864a30.59 30.59 0 0 0-42.752 0 29.12 29.12 0 0 0 0 41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.728 30.59 30.59 0 0 0-42.752 0z"></path></svg></i></div></div></div>
+         <div class="el-select el-select--default p-w-200"><div class="el-select__wrapper"><div class="el-select__prefix">类型</div><select id=sf-type class="el-select__native" onchange="sload()"><option value="">请选择</option><option>反向代理</option><option>静态</option><option>应用</option></select><div class="el-select__suffix"><i class="el-icon el-select__caret el-select__icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="M831.872 340.864 512 652.672 192.128 340.864a30.59 30.59 0 0 0-42.752 0 29.12 29.12 0 0 0 0 41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.728 30.59 30.59 0 0 0-42.752 0z"></path></svg></i></div></div></div>
+         <select class="sel" id=s-node style="height:30px;margin-right:8px" onchange="SITE_NODE=this.value;sload()" title="选择节点"><option value="">本机 (home-4c31g)</option></select>
          <div class="el-select el-select--default p-w-200"><div class="el-select__wrapper"><div class="el-select__prefix">分组</div><select id=sf-group class="el-select__native" onchange="sload()"><option>所有</option></select><div class="el-select__suffix"><i class="el-icon el-select__caret el-select__icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="M831.872 340.864 512 652.672 192.128 340.864a30.59 30.59 0 0 0-42.752 0 29.12 29.12 0 0 0 0 41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.728 30.59 30.59 0 0 0-42.752 0z"></path></svg></i></div></div></div>
          <div style="width:200px;height:32px"><div class="search-button"><div class="el-input el-input--default el-input--suffix"><div class="el-input__wrapper"><input id=sf-name class="el-input__inner" type="text" placeholder="搜索" oninput="sload()"><span class="el-input__suffix"><span class="el-input__suffix-inner"><i class="el-icon el-input__icon el-input__clear" style="visibility:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="m466.752 512-90.496-90.496a32 32 0 0 1 45.248-45.248L512 466.752l90.496-90.496a32 32 0 1 1 45.248 45.248L557.248 512l90.496 90.496a32 32 0 1 1-45.248 45.248L512 557.248l-90.496 90.496a32 32 0 0 1-45.248-45.248z"></path><path fill="currentColor" d="M512 896a384 384 0 1 0 0-768 384 384 0 0 0 0 768m0 64a448 448 0 1 1 0-896 448 448 0 0 1 0 896"></path></svg></i><i class="el-icon el-input__icon"><svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="m795.904 750.72 124.992 124.928a32 32 0 0 1-45.248 45.248L750.656 795.904a416 416 0 1 1 45.248-45.248zM480 832a352 352 0 1 0 0-704 352 352 0 0 0 0 704z"></path></svg></i></span></span></div></div></div></div>
          <button type="button" class="el-button el-button--default fresh-button" onclick="sload()"><i class="el-icon"><svg class="svg-icon"><use xlink:href="#p-refresh"></use></svg></i></button>
@@ -11592,6 +11593,7 @@ Filesystem      Size  Used Avail Use% Mounted on
      <div class="body">
       <div class="row" style="margin-bottom:14px">
        <input id="csearch" class="ipt" placeholder="搜索域名/备注" style="width:220px" oninput="cload()">
+       <select class="sel" id="c-node" style="height:30px" onchange="CERT_NODE=this.value;cload()" title="选择节点"><option value="">本机 (home-4c31g)</option></select>
        <a class="btn ghost" onclick="document.getElementById('csearch').value='';cload()">重置</a>
       </div>
       <table class="tbl"><thead><tr>
@@ -15536,6 +15538,8 @@ function sum_(ok,warn,crit,off){
 const CK_TABS=['dashboard','container','compose','image','network','volume','repo','template','setting'];
 let _ckTimer=null,_ckFilter='all';
 let CK_NODE='';   // 节点选择器: 空 = 本机; 非空 = hosts 表节点名(走 /api/hosts/<n>/docker)
+let SITE_NODE=''; // 站点页节点选择器: 非空 = 远端只读展示 /api/hosts/<n>/nginx
+let CERT_NODE=''; // 证书页节点选择器: 非空 = 远端只读展示 /api/hosts/<n>/certs
 let _ckNodesLoaded=false;
 async function ckLoadNodes(){
  if(_ckNodesLoaded)return;
@@ -15547,7 +15551,19 @@ async function ckLoadNodes(){
  _ckNodesLoaded=true;
  if(CK_NODE)sel.value=CK_NODE;
 }
-ckLoadNodes();
+ckLoadNodes();sLoadNodes();cLoadNodes();
+async function sLoadNodes(){
+ const sel=document.getElementById('s-node');if(!sel)return;
+ try{const r=await fetch('/api/hosts');const d=await r.json();
+  (d||[]).forEach(h=>{const o=document.createElement('option');o.value=h.name;o.textContent=h.name;sel.appendChild(o)});
+ }catch(e){}
+}
+async function cLoadNodes(){
+ const sel=document.getElementById('c-node');if(!sel)return;
+ try{const r=await fetch('/api/hosts');const d=await r.json();
+  (d||[]).forEach(h=>{const o=document.createElement('option');o.value=h.name;o.textContent=h.name;sel.appendChild(o)});
+ }catch(e){}
+}
 function ckSb(){
  const sc=document.querySelector('#ck-pane-container .tblscroll');if(!sc)return;
  const v=document.getElementById('ck-sb-v'),h=document.getElementById('ck-sb-h');if(!v||!h)return;
@@ -16383,6 +16399,24 @@ async function sDelete(n){
  fpToast('删除成功');sload();
 }
 async function sload(){try{
+ const sbase=SITE_NODE?('/api/hosts/'+encodeURIComponent(SITE_NODE)+'/nginx'):'/api/sites';
+ if(SITE_NODE){
+  // 远端节点: 数据来自 nginx 端点(sites-enabled+conf.d + nginx -t), 只读展示
+  const r=await fetch(sbase);const d=await r.json();
+  const sites=(d.sites||[]).concat(d.conf_d||[]).map(p=>({
+   name:p.split('/').pop(), domain:p, type:'反向代理',
+   enabled:1, group:'nginx', ssl_enabled:0, remark:'远端 '+SITE_NODE
+  }));
+  _siteGroups=['nginx'];
+  const gsel=document.getElementById('sf-group');if(gsel){gsel.innerHTML='<option>所有</option><option selected>nginx</option>';}
+  _sites=sites;
+  const tf=document.getElementById('sf-type'),nf=document.getElementById('sf-name'),gf=document.getElementById('sf-group');
+  const ty=tf?tf.value:'',kw=nf?nf.value.trim().toLowerCase():'',gr=gf?gf.value:'所有';
+  const list=_sites.filter(x=>(!ty||sTypeName(x.type)===ty)&&(gr==='所有'||(x.group||'默认')===gr)&&(!kw||(x.name+'').toLowerCase().includes(kw)||(x.domain||'').toLowerCase().includes(kw)));
+  SPG.list=list;sRender(list);
+  const st=document.getElementById('s-nginx-test');if(st)st.textContent=d.test?('nginx -t: '+d.test):'';
+  return;
+ }
  const [r,g]=await Promise.all([fetch('/api/sites'),fetch('/api/sites/groups')]);
  const s=await r.json(),gd=await g.json().catch(()=>({}));
  _siteGroups=gd.groups||['默认'];
@@ -18021,14 +18055,20 @@ function cissuer(c){
  return c.kind==='self'?'自签':'未知';
 }
 async function cload(){
- const d=await fetch('/api/certs').then(r=>r.json()).catch(()=>({certs:[]}));
- CERTS.rows=d.certs||[];
+ const cbase=CERT_NODE?('/api/hosts/'+encodeURIComponent(CERT_NODE)+'/certs'):'/api/certs';
+ const d=await fetch(cbase).then(r=>r.json()).catch(()=>({certs:[]}));
+ let rows=d.certs||[];
+ if(CERT_NODE)rows=rows.map(c=>({
+  domain:(c.subject||'').replace(/^CN ?= ?/,'')||c.path.split('/').pop(),
+  path:c.path, expires:c.not_after&&c.not_after.length>8?c.not_after:'?',
+  method:'远端文件', acct:CERT_NODE, autorenew:0, remark:c.path, alt:''}));
+ CERTS.rows=rows;
  const kw=((document.getElementById('csearch')||{}).value||'').trim().toLowerCase();
  CERTS.kw=kw;
- const rows=CERTS.rows.filter(c=>!kw||c.domain.toLowerCase().includes(kw)||(c.remark||'').toLowerCase().includes(kw));
- CERTS.view=rows;
+ const viewRows=CERTS.rows.filter(c=>!kw||c.domain.toLowerCase().includes(kw)||(c.remark||'').toLowerCase().includes(kw));
+ CERTS.view=viewRows;
  [...CERTS.sel].forEach(n=>{if(!CERTS.rows.some(c=>c.domain===n))CERTS.sel.delete(n)});
- document.getElementById('cbody').innerHTML=rows.map((c,i)=>{
+ document.getElementById('cbody').innerHTML=viewRows.map((c,i)=>{
   const alt=(c.alt||'').split(',').map(x=>x.trim()).filter(Boolean);
   const dn=cdays(c.expires);
   const expTxt=c.expires&&c.expires!=='?'?c.expires.replace(' GMT',''):'-';
@@ -18051,9 +18091,9 @@ async function cload(){
     <a class="btn link" onclick="certRm('${TESC(c.domain)}')">删除</a></td></tr>`;}).join('')
   ||'<tr><td colspan=13 class="empty">暂无数据</td></tr>';
  const ft=document.getElementById('cfoot');
- if(ft)ft.textContent=`共 ${rows.length} 条${kw?`（总计 ${CERTS.rows.length}）`:''} · 已选 ${CERTS.sel.size}`;
+ if(ft)ft.textContent=`共 ${viewRows.length} 条${kw?`（总计 ${CERTS.rows.length}）`:''} · 已选 ${CERTS.sel.size}`;
  const all=document.getElementById('call');
- if(all)all.checked=rows.length>0&&rows.every(c=>CERTS.sel.has(c.domain));
+ if(all)all.checked=viewRows.length>0&&viewRows.every(c=>CERTS.sel.has(c.domain));
 }
 function cSelOne(el){el.checked?CERTS.sel.add(el.dataset.dom):CERTS.sel.delete(el.dataset.dom);cload();}
 function cSelAll(el){(CERTS.view||[]).forEach(c=>{el.checked?CERTS.sel.add(c.domain):CERTS.sel.delete(c.domain)});cload();}
