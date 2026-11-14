@@ -190,7 +190,7 @@ def _docker(args, timeout=40, host=""):   # host 空 = 本机，行为完全不�
 | # | 风险 | 实测证据 | 状态 |
 |---|------|----------|------|
 | 1 | 两台 HK 的 `wg-quick@wg0.service` 均 dead | **✅ 2026-11-14 排查为误报**：wg0 由自建 `wg0-ensure.service`（enabled+active，幂等：无 wg0→up / 有 peer→只确保 UP）接管，重启后自动拉起；双机 peer 各 1、mesh ping 10.8.0.2 通 | [x] |
-| 2 | 120 的 931G 盘没挂 | **✅ 已挂载**：sda1 → `/mnt/data`（fstab UUID 持久化 + `mount -a` 回环验证，2% used / 894G 可用）。`/mnt/storage` 是根盘上的活跃数据目录，迁移待用户拍板 | [x] |
+| 2 | 120 的 931G 盘没挂 | **✅ 已挂载**：sda1 → `/mnt/data`（fstab UUID 持久化 + `mount -a` 回环验证，2% used / 894G 可用）。⚠️ **盘健康存疑，迁移方案作废**：SMART 自检 PASSED、坏块计数全 0，但 dmesg 有 2 次 I/O error（2026-11-03、2026-11-14 14:28，扇区分散），疑似 SATA 线/接口问题。**仅作可丢弃数据盘**，重要数据不落；`/mnt/storage` 不迁。待换线观察 | [x] |
 | 3 | `start.sh` 自匹配 | **✅ 已修**：pgrep 改锚定全匹配 `^python3 app\.py --port 8890$`，实测不再误匹配 shell 包装进程 | [x] |
 | 4 | 追云磁盘偏紧 | **✅ 已缓解**：journald vacuum 释放 1.2G + apt clean → **41% used、剩 8.5G**；journald 永久封顶 200M（conf.d/size.conf）防复发。另清 120 两个 exited frpc 容器+镜像（frp 已退役的残留） | [x] |
 
