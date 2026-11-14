@@ -14904,7 +14904,11 @@ async function ovload(){
  }
  const ldPct=Math.min(100,ld/Math.max(1,d.cores)*100);
  st=ring(ldPct,lc,ldPct.toFixed(2)+' %','负载',lb,pLoad);
- st+=ring(ldPct,'#409eff',ldPct.toFixed(2)+' %','CPU',`<div class="text-center">( ${ld.toFixed(2)} / ${d.cores} ) 核</div>`,pCpu,430);
+ // CPU 环显示真实 CPU 使用率(各逻辑核均值),负载只作副标题
+ const cu=(d.cpu_usage||[]).filter(v=>typeof v==='number');
+ const cpuPct=cu.length?cu.reduce((a,b)=>a+b,0)/cu.length:0;
+ const cpuCol=cpuPct<60?'#409eff':cpuPct<85?'#e6a23c':'#f56c6c';
+ st+=ring(cpuPct,cpuCol,cpuPct.toFixed(2)+' %','CPU',`<div class="text-center">( ${ld.toFixed(2)} / ${d.cores} ) 核</div>`,pCpu,430);
  st+=ring(mm.pct||0,'#e6a23c',(mm.pct||0).toFixed(2)+' %','内存',`${fmtB(mm.used)} / ${fmtB(mm.total)}`,pMem,480);
  st+=ring(dd.pct||0,'#f56c6c',(dd.pct||0).toFixed(2)+' %','/',`${fmtB(dd.used)} / ${fmtB(dd.total)}`,pDisk,450);
  document.getElementById('ov-status').innerHTML=st;
