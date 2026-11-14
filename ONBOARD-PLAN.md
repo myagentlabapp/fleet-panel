@@ -173,7 +173,7 @@ def _docker(args, timeout=40, host=""):   # host 空 = 本机，行为完全不�
 
 | 文件 | 现状（实测） | 应换成 | 状态 |
 |---|---|---|---|
-| `dbassets.json` | 2 条假：127.0.0.1:3306 / :6379，**两个端口都没监听** | ~7 个真实 DB 容器 | [x] 10 条真实 DB（111×6 PG + 8c8g-a pg/pgbouncer + 120 pg/pgbouncer + 116 syspass-db + immich-redis） |
+| `dbassets.json` | 2 条假：127.0.0.1:3306 / :6379，**两个端口都没监听** | ~7 个真实 DB 容器 | [x] 10 条真实 DB + **真实凭据已录入并验证**（2026-11-15：凭据取自容器 env，9 条容器侧 `select 1` 实连通过；网络可达性如实标注 —— .9 loopback-only、多数为 docker 内网无宿主端口、.4 WG 可达；`server/data/` 在 .gitignore 中不入库） |
 | `mcp.json` | 2 条假，都绑 `demo-site-3.local` | 8c8g-b 上 10 个真实 MCP | [x] 10 条真实 MCP（8c8g-b:9110，wiki/gitlab/mail/nexus/jenkins/agents/browser/dify/lsky/demo） |
 | `models.json` | `glm-4-flash` → 127.0.0.1:8000，**Connection refused** | new-api 在 .6:9210 / .9:9212 | [x] 3 条真实端点（8c8g-a:9212 生产 / xian-2c2g:9210 个人 HTTPS / 本机 aigw），API 探测均在线 |
 | `sites/` | `t1`(停用静态) + `wafdemo` | 26 + 22 + 21 个真实站点 | [~] t1 为真实停用测试站、wafdemo 真实反代；远端站点接入随阶段 2 逐台推进（T6 nginx 端点已能拉真列表） |
