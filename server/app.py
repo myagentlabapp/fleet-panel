@@ -1053,10 +1053,12 @@ def term_cmds():
 def term_cmd_save(d, cid=None):
     with _TERM_LOCK:
         db = _term_load()
+        # 命令末尾允许保留空格: 末尾留空格表示"参数占位"(点击只插入不执行)
         c = {"id": cid or uuid.uuid4().hex[:12], "name": (d.get("name") or "").strip(),
-             "command": (d.get("command") or "").strip(), "group": d.get("group") or "Default"}
+             "command": (d.get("command") or "").lstrip().replace("\r", "").replace("\n", " "),
+             "group": d.get("group") or "Default"}
         if not c["name"]: return {"ok": False, "msg": "名称不能为空"}
-        if not c["command"]: return {"ok": False, "msg": "命令不能为空"}
+        if not c["command"].strip(): return {"ok": False, "msg": "命令不能为空"}
         if not any(x["id"] == c["id"] for x in db["commands"]):
             db["commands"].append(c)
         else:
@@ -1078,8 +1080,10 @@ def term_cmd_import(items):
         db = _term_load()
         for it in (items or []):
             if not isinstance(it, dict): continue
-            name = str(it.get("name") or "").strip(); command = str(it.get("command") or "").strip()
-            if not name or not command: continue
+            name = str(it.get("name") or "").strip()
+            # 与 term_cmd_save 一致: 末尾空格是"参数占位"标记, 导入时保留
+            command = str(it.get("command") or "").lstrip().replace("\r", "").replace("\n", " ")
+            if not name or not command.strip(): continue
             db["commands"].append({"id": uuid.uuid4().hex[:12], "name": name, "command": command,
                                    "group": str(it.get("group") or "Default")})
             n += 1
@@ -1120,6 +1124,229 @@ def term_exec(hid, cmd, timeout=60):
     r = ssh_exec(h, cmd, timeout=timeout, pwd=pwd)
     r["local"] = False
     return r
+
+# ---------- 交互式终端会话 (PTY 承载, 非一次性命令) ----------
+# 服务器没装 websocket 库, 这里用「PTY + 轮询」实现真终端: 后端把 bash / ssh -tt
+# 挂到一个 pty 上, 前台线程持续读 master 端, 前端 xterm.js 定时拉增量并回传按键。
+import pty as _pty
+import fcntl as _fcntl
+import termios as _termios
+import struct as _struct
+import base64 as _b64
+import select as _select
+
+_TSESS = {}
+_TSESS_LOCK = threading.Lock()
+_TSESS_MAX = 24
+_TSESS_IDLE = 1800          # 30 分钟无操作回收
+
+
+def _tssh_argv(host):
+    """远端交互终端: 优先用终端主机记录, 否则走节点免密(root + NODE_KEY)。"""
+    addr, rec = _node_login(host)
+    if not addr:
+        return None, f"未找到节点 {host} 的地址(先在节点管理里纳管)"
+    args = ["ssh", "-tt", "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10",
+            "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=30"]
+    if rec:
+        port = str(rec.get("port") or 22)
+        who = f"{rec.get('user') or 'root'}@{addr}"
+        kp = os.path.expanduser(rec.get("keyPath") or "")
+        if rec.get("auth") == "key" and kp and os.path.isfile(kp):
+            return args + ["-i", kp, "-o", "IdentitiesOnly=yes",
+                           "-o", "BatchMode=yes", "-p", port, who], None
+        if rec.get("auth") == "password" and rec.get("password"):
+            return (["sshpass", "-p", rec["password"]] + args +
+                    ["-o", "PreferredAuthentications=password",
+                     "-o", "PubkeyAuthentication=no", "-o", "BatchMode=no",
+                     "-p", port, who]), None
+    if os.path.isfile(NODE_KEY):
+        args += ["-i", NODE_KEY, "-o", "IdentitiesOnly=yes"]
+    args += ["-o", "BatchMode=yes", "-p", "22", f"{NODE_USER}@{addr}"]
+    return args, None
+
+
+def _tty_spawn(argv, env=None):
+    """起一个带控制终端的子进程, 返回 (Popen, master_fd)。"""
+    mfd, sfd = _pty.openpty()
+    fd = sfd
+
+    def _pre():
+        os.setsid()
+        _fcntl.ioctl(0, _termios.TIOCSCTTY, 0)
+
+    p = _sp.Popen(argv, stdin=fd, stdout=fd, stderr=fd, preexec_fn=_pre,
+                  close_fds=True, env=env or os.environ.copy())
+    os.close(sfd)
+    os.set_blocking(mfd, False)
+    return p, mfd
+
+
+def _tty_size(fd, cols, rows):
+    try:
+        _fcntl.ioctl(fd, _termios.TIOCSWINSZ,
+                     _struct.pack("HHHH", max(2, int(rows)), max(2, int(cols)), 0, 0))
+    except Exception:
+        pass
+
+
+def _tsess_read(sid, s):
+    """读线程: 把 pty 输出攒进环形缓冲, 唤醒轮询请求。"""
+    fd = s["fd"]
+    while True:
+        try:
+            r, _, _ = _select.select([fd], [], [], 0.5)
+        except Exception:
+            break
+        if not r:
+            continue
+        try:
+            d = os.read(fd, 65536)
+        except OSError:
+            d = b""
+        if not d:
+            break
+        with s["lock"]:
+            s["buf"] += d
+            if len(s["buf"]) > 2_000_000:
+                cut = len(s["buf"]) - 1_000_000
+                del s["buf"][:cut]
+                s["base"] += cut
+        s["ev"].set()
+    s["alive"] = False
+    try:
+        os.close(fd)
+    except Exception:
+        pass
+    try:
+        s["rc"] = s["p"].wait(timeout=3)
+    except Exception:
+        s["rc"] = -1
+    s["ev"].set()
+
+
+def term_session_open(host, cols=100, rows=30):
+    host = str(host or "local").strip()
+    if host in ("", "local", "this", "localhost"):
+        argv = ["bash", "-l"]
+    else:
+        argv, err = _tssh_argv(host)
+        if not argv:
+            return {"ok": False, "msg": err}
+    env = os.environ.copy()
+    env["TERM"] = "xterm-256color"
+    env.setdefault("LANG", "C.UTF-8")
+    try:
+        p, fd = _tty_spawn(argv, env)
+    except FileNotFoundError as e:
+        return {"ok": False, "msg": f"缺少组件: {e.filename}"}
+    except Exception as e:
+        return {"ok": False, "msg": f"创建终端失败: {e}"}
+    _tty_size(fd, cols, rows)
+    sid = uuid.uuid4().hex
+    s = {"sid": sid, "fd": fd, "p": p, "buf": bytearray(), "base": 0,
+         "lock": threading.Lock(), "ev": threading.Event(), "alive": True,
+         "rc": None, "at": time.time(), "host": host}
+    with _TSESS_LOCK:
+        # 超上限时回收最久未活动的会话
+        while len(_TSESS) >= _TSESS_MAX:
+            old = min(_TSESS.values(), key=lambda x: x["at"])
+            _TSESS.pop(old["sid"], None)
+            _tsess_kill(old)
+        _TSESS[sid] = s
+    threading.Thread(target=_tsess_read, args=(sid, s), daemon=True).start()
+    return {"ok": True, "sid": sid, "host": host}
+
+
+def _tsess_kill(s):
+    try:
+        s["p"].terminate()
+    except Exception:
+        pass
+    try:
+        os.close(s["fd"])
+    except Exception:
+        pass
+
+
+def _tsess_get(sid):
+    with _TSESS_LOCK:
+        s = _TSESS.get(str(sid or ""))
+    if s:
+        s["at"] = time.time()
+    return s
+
+
+def term_session_feed(sid, data):
+    s = _tsess_get(sid)
+    if not s or not s["alive"]:
+        return {"ok": False, "msg": "会话不存在或已结束"}
+    try:
+        if isinstance(data, str):
+            data = data.encode()
+        if data:
+            os.write(s["fd"], data)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+def term_session_poll(sid, off=0, wait=0.0):
+    s = _tsess_get(sid)
+    if not s:
+        return {"ok": False, "alive": False, "msg": "会话不存在"}
+    try:
+        wait = max(0.0, min(3.0, float(wait)))
+    except Exception:
+        wait = 0.0
+    if wait and s["alive"]:
+        with s["lock"]:
+            empty = len(s["buf"]) + s["base"] <= int(off or 0)
+        if empty:
+            s["ev"].clear()
+            s["ev"].wait(wait)
+    with s["lock"]:
+        base = s["base"]
+        off = max(int(off or 0), base)
+        chunk = bytes(s["buf"][off - base:])
+        end = base + len(s["buf"])
+    s["ev"].clear()
+    return {"ok": True, "off": end, "data": _b64.b64encode(chunk).decode(),
+            "alive": bool(s["alive"]), "rc": s["rc"]}
+
+
+def term_session_resize(sid, cols, rows):
+    s = _tsess_get(sid)
+    if not s or not s["alive"]:
+        return {"ok": False}
+    _tty_size(s["fd"], cols, rows)
+    return {"ok": True}
+
+
+def term_session_close(sid):
+    with _TSESS_LOCK:
+        s = _TSESS.pop(str(sid or ""), None)
+    if not s:
+        return {"ok": True}
+    _tsess_kill(s)
+    return {"ok": True}
+
+
+def _tsess_gc():
+    """后台回收: 长期无活动的会话。"""
+    while True:
+        time.sleep(120)
+        now = time.time()
+        with _TSESS_LOCK:
+            stale = [x for x in _TSESS.values() if now - x["at"] > _TSESS_IDLE]
+            for x in stale:
+                _TSESS.pop(x["sid"], None)
+        for x in stale:
+            _tsess_kill(x)
+
+
+threading.Thread(target=_tsess_gc, daemon=True).start()
 
 # ---------- 文件管理 (D1) ----------
 ALLOWED_DIRS = [os.environ.get("FLEET_BASE", "/home/yy"), "/mnt", "/tmp", "/srv", "/"]
@@ -5574,7 +5801,7 @@ def make_app():
         items = d.get("items")
         if items is None and d.get("text"):
             try: items = json.loads(d["text"])
-            except Exception: items = [{"name": ln.split("=")[0].strip(), "command": ln.split("=",1)[1].strip()}
+            except Exception: items = [{"name": ln.split("=")[0].strip(), "command": ln.split("=",1)[1].lstrip()}
                                        for ln in d["text"].splitlines() if "=" in ln]
         return jsonify(term_cmd_import(items))
 
@@ -5595,6 +5822,45 @@ def make_app():
         d = request.get_json(force=True, silent=True) or {}
         return jsonify(term_exec(d.get("host", "local"), d.get("cmd", ""),
                                  int(d.get("timeout") or 60)))
+
+    # ---- 交互式终端 (PTY 会话: 开 / 写 / 轮询 / 改窗口 / 关) ----
+    @app.post("/api/term/session")
+    def api_term_session_open():
+        if not need_auth(): return jsonify({"error": "unauth"}), 401
+        d = request.get_json(force=True, silent=True) or {}
+        return jsonify(term_session_open(d.get("host", "local"),
+                                         d.get("cols") or 100, d.get("rows") or 30))
+
+    @app.post("/api/term/session/write")
+    def api_term_session_write():
+        if not need_auth(): return jsonify({"error": "unauth"}), 401
+        d = request.get_json(force=True, silent=True) or {}
+        raw = d.get("data") or ""
+        try:
+            data = _b64.b64decode(raw) if d.get("b64") else str(raw).encode()
+        except Exception:
+            data = str(raw).encode()
+        return jsonify(term_session_feed(d.get("sid"), data))
+
+    @app.post("/api/term/session/poll")
+    def api_term_session_poll():
+        if not need_auth(): return jsonify({"error": "unauth"}), 401
+        d = request.get_json(force=True, silent=True) or {}
+        return jsonify(term_session_poll(d.get("sid"), d.get("off") or 0,
+                                         d.get("wait") or 0))
+
+    @app.post("/api/term/session/resize")
+    def api_term_session_resize():
+        if not need_auth(): return jsonify({"error": "unauth"}), 401
+        d = request.get_json(force=True, silent=True) or {}
+        return jsonify(term_session_resize(d.get("sid"), d.get("cols") or 100,
+                                           d.get("rows") or 30))
+
+    @app.post("/api/term/session/close")
+    def api_term_session_close():
+        if not need_auth(): return jsonify({"error": "unauth"}), 401
+        d = request.get_json(force=True, silent=True) or {}
+        return jsonify(term_session_close(d.get("sid")))
 
     # ---- 文件管理 (D1) ----
     @app.get("/api/fs")
@@ -6918,6 +7184,7 @@ def make_app():
             if not pth.startswith("/api/") or pth.startswith("/api/agent/") or pth.startswith("/api/login"):
                 return resp
             if pth in ("/api/audit/clean", "/api/audit/clear"): return resp   # 清空接口自带记录
+            if pth.startswith("/api/term/session"): return resp   # 交互终端高频轮询, 不记操作日志
             src = "xapp"
             for pat, sc in _OP_MAP:
                 if re.match(pat, pth): src = sc; break
@@ -9838,16 +10105,22 @@ html[data-fleet-theme="dark"] #hl-panel .el-alert--info.is-light,html[data-fleet
 #term .term-wins{flex:1;min-height:0;display:flex}
 #term .term-win{flex:1;min-height:0;display:flex;flex-direction:column;background:#000;overflow:hidden}
 #term .term-win[hidden],#term .term-wins[hidden]{display:none}
-#term .term-out{flex:1;min-height:0;overflow:auto;margin:0;padding:8px 10px;white-space:pre-wrap;word-break:break-all;font-family:Monaco,Menlo,Consolas,"Courier New",monospace;font-size:12px;line-height:1.2;background:#000;color:#f5f5f5}
-#term .term-inbar{flex:none;display:flex;align-items:center;gap:8px;padding:6px 10px;background:#000;border-top:1px solid #2a2a2a}
-#term .term-inbar .term-ps{color:#6ee7a8;font-family:Monaco,Menlo,Consolas,monospace;font-size:12px}
-#term .term-inbar input{flex:1;min-width:0;height:26px;background:transparent;border:none;outline:none;color:#f5f5f5;font-family:Monaco,Menlo,Consolas,monospace;font-size:12px}
-#term .term-cmdbar{flex:none;display:flex;align-items:center;gap:8px;padding:6px 10px;border-top:1px solid var(--el-border-color-lighter,#ebeef5);background:var(--el-fill-color-blank,#fff);min-height:36px;overflow-x:auto}
+#term .term-win .term-xterm{flex:1;min-height:0;padding:6px 8px;box-sizing:border-box;overflow:hidden;background:#000}
+#term .term-win .term-xterm .xterm{height:100%}
+#term .term-status{flex:none;padding:3px 10px;font-size:12px;color:#8b8f96;background:#0b0b0b;border-top:1px solid #1e1e1e;min-height:20px;box-sizing:border-box}
+#term .term-status.err{color:#e06c75}
+#term .term-cmdbar{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;padding:6px 10px;border-top:1px solid var(--el-border-color-lighter,#ebeef5);background:var(--el-fill-color-blank,#fff);min-height:36px;max-height:96px;overflow-y:auto}
 #term .term-cmdbar[hidden]{display:none}
 #term .term-cmdbar-lbl{font-size:12px;color:var(--el-text-color-secondary,#909399);white-space:nowrap}
-#term .term-cmdchips{display:flex;gap:6px;flex-wrap:nowrap}
+#term .term-chipg{flex:none;height:24px;font-size:12px;padding:0 4px;border:1px solid var(--el-border-color,#dcdfe6);border-radius:4px;color:var(--el-text-color-regular,#606266);background:var(--el-fill-color-blank,#fff);outline:none;cursor:pointer}
+#term .term-chipg:focus{border-color:var(--primary)}
+#term .term-chipq{flex:none;width:110px;height:24px;font-size:12px;padding:0 6px;border:1px solid var(--el-border-color,#dcdfe6);border-radius:4px;color:var(--el-text-color-regular,#606266);background:var(--el-fill-color-blank,#fff);outline:none}
+#term .term-chipq:focus{border-color:var(--primary)}
+#term .term-chipbar-empty{font-size:12px;color:var(--el-text-color-secondary,#909399)}
+#term .term-cmdchips{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
 #term .term-chip{padding:0 10px;height:24px;line-height:22px;border:1px solid var(--el-border-color,#dcdfe6);border-radius:4px;font-size:12px;color:var(--el-text-color-regular,#606266);cursor:pointer;background:var(--el-fill-color-blank,#fff);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
 #term .term-chip:hover{color:var(--primary);border-color:var(--primary)}
+#term .term-chip-arg{border-style:dashed}
 #term .terminal-actions{position:absolute;top:4px;right:4px;display:flex;gap:2px;z-index:3}
 #term .terminal-actions .terminal-action{width:32px;height:32px;padding:0;border:none;background:transparent;color:var(--el-text-color-regular,#606266);display:inline-flex;align-items:center;justify-content:center;border-radius:4px;cursor:pointer}
 #term .terminal-actions .terminal-action:hover{background:var(--el-fill-color,rgba(0,0,0,.06))}
@@ -10395,6 +10668,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
 #kvm .vm-risk-item.danger strong{color:var(--danger)}
 #kvm .vm-meta{color:var(--text3);font-size:12px}
 </style><link rel="stylesheet" href="/static/vendor/mdeditor.css">
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 <style>
 /* fleet 覆盖:1Panel memo-content 规则在其后生效 */
 </style></head><body>
@@ -10899,7 +11173,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
        <div class="el-tabs__content" id="term-content">
         <div class="el-empty" id="term-empty"><div class="el-empty__image"><svg viewBox="0 0 79 86" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="term-eg1" x1="38.85%" y1="0%" x2="61.15%" y2="100%"><stop stop-color="#f2f5fc" offset="0%"></stop><stop stop-color="#e6ebf5" offset="100%"></stop></linearGradient><linearGradient id="term-eg2" x1="0%" y1="9.5%" x2="100%" y2="90.5%"><stop stop-color="#f2f5fc" offset="0%"></stop><stop stop-color="#dce0e9" offset="100%"></stop></linearGradient></defs><g fill="none" fill-rule="evenodd"><path d="M39.5,86 C61.3,86 79,83.9 79,81.3 C79,78.8 57.3,78 35.5,78 C13.7,78 0,78.8 0,81.3 C0,83.9 17.7,86 39.5,86 Z" fill="#edeff5"></path><polygon fill="url(#term-eg2)" points="13 58 53 58 42 45 2 45"></polygon><polygon fill="url(#term-eg1)" points="10 6 44 6 61 52 10 52"></polygon><path d="M44,6 L60.5,51.5 L10,51.5 Z" fill="#f7f9fd"></path><path d="M21,44 L48,44 L48,47 L21,47 Z" fill="#dfe4ee"></path><path d="M21,36 L40,36 L40,39 L21,39 Z" fill="#dfe4ee"></path><ellipse cx="39.5" cy="81.5" rx="26" ry="2.5" fill="#ffffff" opacity=".6"></ellipse></g></svg></div><div class="el-empty__description"><p>暂无终端连接</p></div></div>
         <div class="term-wins" id="term-wins" style="display:none"></div>
-        <div class="term-cmdbar"><span class="term-cmdbar-lbl">常用命令</span><div class="term-cmdchips" id="term-cmdchips"></div></div>
+        <div class="term-cmdbar"><span class="term-cmdbar-lbl">常用命令</span><select class="term-chipg" id="term-chipg" title="按分组筛选" onchange="termChips()"></select><input class="term-chipq" id="term-chipq" placeholder="筛选" title="按名称或命令筛选" oninput="termChips()"/><div class="term-cmdchips" id="term-cmdchips"></div></div>
        </div>
       </div>
       <div class="terminal-actions"><button type="button" class="el-button el-button--default is-text terminal-action" aria-label="网页全屏" title="网页全屏" onclick="termFull(this)"><i class="el-icon"><svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="m160 96.064 192 .192a32 32 0 0 1 0 64l-192-.192V352a32 32 0 0 1-64 0V96h64v.064zm0 831.872V928H96V672a32 32 0 1 1 64 0v191.936l192-.192a32 32 0 1 1 0 64l-192 .192zM864 96.064V96h64v256a32 32 0 1 1-64 0V160.064l-192 .192a32 32 0 1 1 0-64l192-.192zm0 831.872-192-.192a32 32 0 0 1 0-64l192 .192V672a32 32 0 1 1 64 0v256h-64v-.064z"></path></svg></i></button></div>
@@ -12242,7 +12516,9 @@ Filesystem      Size  Used Avail Use% Mounted on
 
 <div class="footer app-footer"><div class="footer-content"><div class="footer-copyright"><a href="https://fit2cloud.com/" target="_blank"> Copyright © 2014-2026 飞致云</a></div><div class="footer-navigation footer-navigation-panel"><a class="el-link el-link--primary"><span class="el-link__inner"><span class="font-normal">了解商业版</span></span></a><div class="el-divider el-divider--vertical" role="separator"></div><a class="el-link el-link--primary"><span class="el-link__inner"><span class="font-normal">论坛求助</span></span></a><div class="el-divider el-divider--vertical" role="separator"></div><a class="el-link el-link--primary"><span class="el-link__inner"><span class="font-normal">使用手册</span></span></a><div class="el-divider el-divider--vertical" role="separator"></div><a class="el-link el-link--primary"><span class="el-link__inner"><span class="font-normal">项目地址</span></span></a><div class="el-divider el-divider--vertical footer-navigation__tail" role="separator"></div></div><div class="footer-upgrade"><div class="flex flex-wrap items-center"><div class="flex flex-wrap items-center"><a class="el-link el-link--primary"><span class="el-link__inner">企业版</span></a><a class="el-link el-link--primary version"><span class="el-link__inner">v2.4.2</span></a><div class="el-badge -mt-0.5"><a class="el-link el-link--primary ml-2"><span class="el-link__inner">更新</span></a><sup class="el-badge__content el-badge__content--danger is-fixed is-dot" style="margin-right: 0px; margin-top: 0px;"></sup></div></div></div></div></div></div>
  </div>
-</div><script>
+</div><script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/addon-fit.js"></script>
+<script>
 const TOK='{{ SESSION_TOKEN }}';
 const __of=window.fetch;window.fetch=function(u,o){o=o||{};o.headers=o.headers||{};o.headers['X-Fleet-Token']=o.headers['X-Fleet-Token']||TOK;if(window.__fsess){o.headers['Authorization']='Bearer '+window.__fsess;}return __of(u,o);};
 const F={load1:2,mem:85,disk:85,lat:300};
@@ -16385,7 +16661,7 @@ async function termGroupRm(name){
  if(!d.ok){fpToast(d.msg||'删除失败','error');return;}
  TERM.groups=d.groups||TERM.groups;fpToast('删除成功');termGroupRender();termHostLoad();
 }
-/* ---------- 终端窗口 ---------- */
+/* ---------- 终端窗口 (xterm.js + 后端 PTY 会话) ---------- */
 function termAddConnection(el){termAddMenu(el);}
 function termAddMenu(el){
  document.querySelectorAll('.tc-menu').forEach(x=>x.remove());
@@ -16399,16 +16675,20 @@ function termAddMenu(el){
 function termOpenLocal(){termOpen({id:'local',addr:'localhost',user:'local',title:'本地服务器'});}
 function termOpenHost(id){const h=TERM.hosts.find(x=>x.id===id);if(h)termOpen(h);else fpToast('主机不存在','error');}
 function termHostConn(id){termOpenHost(id);}
+/* 多机管理的「终端」: 直接开该节点的交互式 SSH 终端 */
+function termOpenNode(name){termOpen({id:'node:'+name,node:name,addr:name,user:'root',title:name});}
 function termOpen(h){
- const key=(h&&(h.id||h.addr))||'local';
+ h=h||{id:'local',addr:'localhost',title:'本地服务器'};
+ const key=String(h.id||h.addr||'local').replace(/[^\w.:@+-]/g,'_');
  let w=TERM.wins.find(x=>x.key===key);
  if(!w){
-  w={key,host:h||{id:'local',addr:'localhost',title:'本地服务器'},buf:'',hist:[],hi:0};
+  w={key,host:h,dead:false,sid:null,off:0,alive:false,pending:'',connecting:false};
   TERM.wins.push(w);
-  const out=`$$ ping -c 2 localhost\nPING localhost (127.0.0.1): 56 data bytes\n64 bytes from 127.0.0.1: icmp_seq=0 ttl=64 time=0.042 ms\n64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.039 ms\n\n--- localhost ping statistics ---\n2 packets transmitted, 2 packets received, 0.0% packet loss\n`;
-  w.buf=`\x1b[32mWelcome to 1Panel Terminal\x1b[0m\nConnected to ${h?((h.title||'')?(h.title+' · '):'')+(h.user||'')+'@'+(h.addr||'')+(h.port&&h.id!=='local'?':'+h.port:'') : 'localhost'}\nType commands and press Enter. Use \`exit\` to close this tab.\n\n`;
  }
- TERM.cur=key;termDrawWins();termTab('terminal');
+ TERM.cur=key;
+ termDrawWins();
+ termTab('terminal');
+ setTimeout(()=>{termFit(w);if(w.xterm)w.xterm.focus();},60);
 }
 function termTabTitle(w){
  if(w.key==='local')return '本地服务器';
@@ -16425,87 +16705,165 @@ function termDrawWins(){
  empty.style.display='none';wins.style.display='';tabsEl.classList.add('has-conn');
  if(!TERM.wins.find(x=>x.key===TERM.cur))TERM.cur=TERM.wins[0].key;
  tabs.innerHTML=TERM.wins.map(w=>`<li class="term-tab ${w.key===TERM.cur?'is-active':''}" title="${TESC(termTabTitle(w))}"><span class="term-tab-name" onclick="termSwitch('${w.key}')"><i><svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M832 64H192a64 64 0 0 0-64 64v768a64 64 0 0 0 64 64h640a64 64 0 0 0 64-64V128a64 64 0 0 0-64-64zm0 832H192V128h640v768zM320 320h384v64H320zm0 192h384v64H320zm0 192h256v64H320z"></path></svg></i>${TESC(w.key==='local'?'本地服务器':((w.host&&(w.host.title||w.host.addr))||'主机'))}</span><span class="term-tab-close" onclick="event.stopPropagation();termClose('${w.key}')">✕</span></li>`).join('');
- wins.innerHTML=TERM.wins.map(w=>`<div class="term-win" data-key="${w.key}" ${w.key===TERM.cur?'':'hidden'}>
-   <pre class="term-out" id="term-out-${w.key}"></pre>
-   <div class="term-inbar"><span class="term-ps" id="term-ps-${w.key}">$</span><input id="term-in-${w.key}" autocomplete="off" spellcheck="false" placeholder="输入命令后回车执行" onkeydown="termKey(event,'${w.key}')"></div></div>`).join('');
- TERM.wins.forEach(w=>{const o=document.getElementById('term-out-'+w.key);if(o){o.innerHTML=termANSI(w.buf);o.scrollTop=o.scrollHeight;}
-   const i=document.getElementById('term-in-'+w.key);if(i&&w.key===TERM.cur)setTimeout(()=>i.focus(),0);});
- termApplyFont();termChips();
+ /* 窗口容器按需创建, 已存在的 xterm 实例不重建(避免丢会话) */
+ TERM.wins.forEach(w=>{
+  let el=[...wins.children].find(x=>x.dataset.key===w.key);
+  if(!el){
+   el=document.createElement('div');el.className='term-win';el.dataset.key=w.key;
+   el.innerHTML='<div class="term-xterm"></div><div class="term-status"></div>';
+   wins.appendChild(el);
+   termAttach(w,el);
+  }
+  el.hidden=w.key!==TERM.cur;
+ });
+ [...wins.children].forEach(el=>{if(!TERM.wins.find(w=>w.key===el.dataset.key))el.remove();});
+ setTimeout(()=>{const w=TERM.wins.find(x=>x.key===TERM.cur);if(w){termFit(w);if(w.xterm)w.xterm.focus();}},0);
+ termChips();
 }
-function termTabPs(w){return w.key==='local'?'local':(w.host.user||'root')+'@'+(w.host.addr||'');}
-function termSwitch(k){TERM.cur=k;termDrawWins();}
+function termStatus(w,txt,cls){
+ if(!w.status)return;
+ w.status.textContent=txt||'';
+ w.status.className='term-status'+(cls?' '+cls:'');
+}
+function termAttach(w,el){
+ const cfg=TERM.cfg||TCFG_DEF;
+ if(!window.Terminal){el.innerHTML='<div class="term-status err" style="padding:10px">终端组件加载失败(static/vendor/xterm/xterm.js)</div>';return;}
+ const fams=(cfg.fontFamily&&cfg.fontFamily.length?cfg.fontFamily:TCFG_DEF.fontFamily);
+ const t=new Terminal({fontSize:parseInt(cfg.fontSize)||13,fontFamily:fams.map(f=>/[ ,]/.test(f)?`"${f}"`:f).join(', '),
+  cursorBlink:true,scrollback:5000,
+  theme:{background:cfg.background||'#000000',foreground:cfg.foreground||'#f5f5f5'}});
+ if(window.FitAddon&&window.FitAddon.FitAddon){w.fit=new window.FitAddon.FitAddon();t.loadAddon(w.fit);}
+ t.open(el.querySelector('.term-xterm'));
+ w.xterm=t;w.status=el.querySelector('.term-status');
+ t.onData(s=>termSessionWrite(w,s));
+ t.onResize(({cols,rows})=>termSessionResize(w,cols,rows));
+ termStatus(w,'连接中…');
+ termConnect(w);
+}
+function termFit(w){
+ if(!w||!w.fit)return;
+ try{w.fit.fit();}catch(e){}
+}
+function termConnect(w){
+ if(w.connecting)return;
+ w.connecting=true;
+ const hostId=(w.host&&(w.host.node||w.host.id||w.host.addr))||'local';
+ const cols=(w.xterm&&w.xterm.cols)||100, rows=(w.xterm&&w.xterm.rows)||30;
+ TJ('/api/term/session',{method:'POST',body:JSON.stringify({host:hostId,cols,rows})}).then(d=>{
+  w.connecting=false;
+  if(w.dead)return;
+  if(!d||!d.ok){
+   const msg=(d&&d.msg)||'连接失败';
+   termStatus(w,msg,'err');
+   if(w.xterm)w.xterm.write('\r\n\x1b[31m'+msg+'\x1b[0m\r\n');
+   return;
+  }
+  w.sid=d.sid;w.off=0;w.alive=true;
+  termStatus(w,'已连接');
+  if(w.pending){const p=w.pending;w.pending='';termSessionWrite(w,p);}
+  termPoll(w);
+ }).catch(e=>{
+  w.connecting=false;
+  if(w.dead)return;
+  termStatus(w,String(e),'err');
+  if(w.xterm)w.xterm.write('\r\n\x1b[31m请求失败: '+e+'\x1b[0m\r\n');
+ });
+}
+function termB64(s){
+ const a=new TextEncoder().encode(String(s));let b='';
+ for(let i=0;i<a.length;i++)b+=String.fromCharCode(a[i]);
+ return btoa(b);
+}
+function termSessionWrite(w,s){
+ if(!s)return;
+ if(!w.sid){w.pending+=s;return;}
+ TJ('/api/term/session/write',{method:'POST',body:JSON.stringify({sid:w.sid,data:termB64(s),b64:true})}).catch(()=>{});
+}
+async function termPoll(w){
+ while(w.sid&&!w.dead){
+  try{
+   const d=await TJ('/api/term/session/poll',{method:'POST',body:JSON.stringify({sid:w.sid,off:w.off,wait:1.2})});
+   if(w.dead||!w.sid)return;
+   if(d&&d.data&&w.xterm){
+    const bin=atob(d.data),arr=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
+    w.xterm.write(arr);
+   }
+   if(d&&typeof d.off==='number')w.off=d.off;
+   if(!d||!d.alive){
+    w.sid=null;w.alive=false;termStatus(w,'已断开','err');
+    return;
+   }
+  }catch(e){
+   await new Promise(r=>setTimeout(r,800));
+  }
+ }
+}
+let _termRszT=null;
+function termSessionResize(w){
+ if(!w.sid||!w.xterm)return;
+ clearTimeout(_termRszT);
+ const cols=w.xterm.cols,rows=w.xterm.rows;
+ _termRszT=setTimeout(()=>{
+  if(!w.sid)return;
+  TJ('/api/term/session/resize',{method:'POST',body:JSON.stringify({sid:w.sid,cols,rows})}).catch(()=>{});
+ },250);
+}
+function termSwitch(k){
+ TERM.cur=k;
+ termDrawWins();
+ setTimeout(()=>{const w=TERM.wins.find(x=>x.key===k);if(w){termFit(w);if(w.xterm)w.xterm.focus();}},30);
+}
 function termClose(k){
+ const w=TERM.wins.find(x=>x.key===k);
+ if(w){
+  w.dead=true;
+  if(w.sid){TJ('/api/term/session/close',{method:'POST',body:JSON.stringify({sid:w.sid})}).catch(()=>{});w.sid=null;}
+  if(w.xterm){try{w.xterm.dispose();}catch(e){}w.xterm=null;}
+ }
  TERM.wins=TERM.wins.filter(x=>x.key!==k);
  if(TERM.cur===k)TERM.cur=TERM.wins.length?TERM.wins[TERM.wins.length-1].key:null;
  termDrawWins();
 }
-function termWrite(w,s){w.buf+=s;if(w.buf.length>400000)w.buf=w.buf.slice(-300000);
- const o=document.getElementById('term-out-'+w.key);if(o){o.innerHTML=termANSI(w.buf);o.scrollTop=o.scrollHeight;}}
-function termANSI(s){
- const esc=x=>x.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
- const col={30:'#000',31:'#e06c75',32:'#98c379',33:'#e5c07b',34:'#61afef',35:'#c678dd',36:'#56b6c2',37:'#dcdfe4',90:'#5c6370',91:'#e06c75',92:'#98c379',93:'#e5c07b',94:'#61afef',95:'#c678dd',96:'#56b6c2',97:'#fff'};
- let out='',m,last=0,open=0;
- const re=/\x1b\[([0-9;]*)m/g;
- while((m=re.exec(s))){
-  out+=esc(s.slice(last,m.index));last=re.lastIndex;
-  const codes=(m[1]||'0').split(';');
-  for(const c of codes){
-   if(c==='0'||c===''){ if(open){out+='</span>';open=0;} }
-   else if(c==='1'){out+='<span style="font-weight:700">';open++;}
-   else if(col[c]){out+=`<span style="color:${col[c]}">`;open++;}
-  }
- }
- out+=esc(s.slice(last));
- while(open--){out+='</span>';}
- return out;
-}
-async function termKey(e,key){
- const inp=e.target;const w=TERM.wins.find(x=>x.key===key);if(!w)return;
- if(e.key==='ArrowUp'){e.preventDefault();if(w.hist.length){w.hi=Math.max(0,w.hi-1);inp.value=w.hist[w.hi]||'';}return;}
- if(e.key==='ArrowDown'){e.preventDefault();if(w.hist.length){w.hi=Math.min(w.hist.length,w.hi+1);inp.value=w.hist[w.hi]||'';}return;}
- if(e.key!=='Enter')return;
- e.preventDefault();
- const cmd=inp.value;inp.value='';
- if(cmd.trim()==='exit'||cmd.trim()==='logout'){termClose(key);return;}
- if(cmd.trim()){w.hist.push(cmd);w.hi=w.hist.length;if(w.hist.length>200)w.hist=w.hist.slice(-200);}
- const ps=(w.key==='local'?'local':(w.host.user||'root')+'@'+(w.host.addr||''));
- w.buf+=`\x1b[32m${ps}\x1b[0m $ ${cmd}\n`;
- const out=document.getElementById('term-out-'+key);if(out){out.innerHTML=termANSI(w.buf);out.scrollTop=out.scrollHeight;}
- if(!cmd.trim())return;
- TERM.cur=key;
- termWrite(w,'\x1b[90m执行中...\x1b[0m\n');
- if(w._pend)return;
- w._pend=true;
- try{
-  const d=await TJ('/api/term/exec',{method:'POST',body:JSON.stringify({host:w.key==='local'?'local':(w.host.id||w.host.addr),cmd,timeout:120})});
-  w.buf=w.buf.replace(/\x1b\[90m执行中\.\.\.\x1b\[0m\n$/,'');
-  let txt=(d&&d.out)||'';
-  if(d&&d.ok===false)txt='\x1b[31m'+(d.msg||d.out||'执行失败')+'\x1b[0m';
-  if(txt&&!txt.endsWith('\n'))txt+='\n';
-  w.buf+=txt+(d&&d.rc!==undefined&&d.rc!==0&&d.ok!==false?`\x1b[31m[rc=${d.rc}]\x1b[0m\n`:'');
- }catch(err){w.buf=w.buf.replace(/\x1b\[90m执行中\.\.\.\x1b\[0m\n$/,'');w.buf+='\x1b[31m请求失败: '+err+'\x1b[0m\n';}
- w._pend=false;
- const o=document.getElementById('term-out-'+key);if(o){o.innerHTML=termANSI(w.buf);o.scrollTop=o.scrollHeight;}
- const n=document.getElementById('term-in-'+key);if(n)n.focus();
+/* 常用命令统一走这里: 命令末尾补回车, 否则 shell 只收到文本不执行;
+   末尾留空格的命令是参数占位(如 ping -c 4 ), 只插入不执行, 等用户补完参数自己回车 */
+function termCmdSend(w,c){
+ if(!w||!c)return;
+ const raw=String(c.command||'').replace(/[\r\n]+$/,'');
+ const needArg=/\s$/.test(raw);
+ if(w.xterm)w.xterm.focus();
+ termSessionWrite(w,needArg?raw:raw+'\r');
 }
 function termCmdRun(id){
  const c=TERM.cmds.find(x=>x.id===id);if(!c)return;
- if(!TERM.cur){termOpenLocal();}
+ if(!TERM.cur)termOpenLocal();
  termTab('terminal');termDrawWins();
- const inp=document.getElementById('term-in-'+TERM.cur);
- if(inp){inp.value=c.command;}
- const b=document.getElementById('term-in-'+TERM.cur);
- if(b){b.focus();b.setSelectionRange(b.value.length,b.value.length);}
+ termCmdSend(TERM.wins.find(x=>x.key===TERM.cur),c);
 }
 function termChips(){
  const box=document.getElementById('term-cmdchips');if(!box)return;
- box.innerHTML=TERM.cmds.slice(0,30).map(c=>`<span class="term-chip" title="${TESC(c.command)}" onclick="termChipUse('${c.id}')">${TESC(c.name)}</span>`).join('');
+ const sel=document.getElementById('term-chipg');
+ if(sel){
+  const cur=sel.value||'';
+  const want=[''].concat(TERM.groups).join('\u0001');
+  const have=Array.from(sel.options).map(o=>o.value).join('\u0001');
+  if(want!==have)sel.innerHTML='<option value="">全部</option>'+TERM.groups.map(g=>`<option value="${TESC(g)}">${TESC(g)}</option>`).join('');
+  sel.value=TERM.groups.includes(cur)?cur:'';
+ }
+ const g=sel?sel.value:'';
+ const q=(document.getElementById('term-chipq')||{}).value||'';
+ const kw=q.trim().toLowerCase();
+ let rows=g?TERM.cmds.filter(c=>(c.group||'Default')===g):TERM.cmds;
+ if(kw)rows=rows.filter(c=>String(c.name||'').toLowerCase().includes(kw)||String(c.command||'').toLowerCase().includes(kw));
+ if(!TERM.cmds.length){box.innerHTML='<span class="term-chipbar-empty">暂无常用命令，到「快速命令」里添加</span>';return;}
+ if(!rows.length){box.innerHTML='<span class="term-chipbar-empty">没有匹配的命令</span>';return;}
+ box.innerHTML=rows.map(c=>{const arg=/\s$/.test(c.command||'');return `<span class="term-chip${arg?' term-chip-arg':''}" title="${TESC(c.command)}${arg?' (插入后补参数再回车)':''}" onclick="termChipUse('${c.id}')">${TESC(c.name)}</span>`;}).join('');
 }
 function termChipUse(id){
  const c=TERM.cmds.find(x=>x.id===id);if(!c)return;
  if(!TERM.cur)termOpenLocal();
- const inp=document.getElementById('term-in-'+TERM.cur);
- if(inp){inp.value=c.command;inp.focus();}
+ termTab('terminal');termDrawWins();
+ termCmdSend(TERM.wins.find(x=>x.key===TERM.cur),c);
 }
 function termFull(btn){
  const t=document.getElementById('term');
@@ -16514,6 +16872,7 @@ function termFull(btn){
  if(btn)btn.title=ic?'退出全屏':'网页全屏';
  if(ic&&document.documentElement.requestFullscreen){document.documentElement.requestFullscreen().catch(()=>{});}
  else if(!ic&&document.fullscreenElement&&document.exitFullscreen){document.exitFullscreen().catch(()=>{});}
+ setTimeout(()=>{TERM.wins.forEach(termFit);},120);
 }
 
 /* ---------- 配置 ---------- */
@@ -16573,10 +16932,23 @@ function termApplyFont(){
   background:(document.getElementById('tc-bg')||{}).value||'#000000',
   foreground:(document.getElementById('tc-fg')||{}).value||'#f5f5f5',
   fontFamily:TERM.cfg.fontFamily||TCFG_DEF.fontFamily};
+ const fam=c.fontFamily.map(f=>/[ ,]/.test(f)?`"${f}"`:f).join(', ');
+ /* xterm 实例: 直接改 theme/字体, 然后重新 fit */
+ const bg=c.background,fg=c.foreground;
+ TERM.wins.forEach(w=>{
+  if(!w.xterm)return;
+  try{
+   w.xterm.options.fontSize=c.fontSize;
+   w.xterm.options.fontFamily=fam;
+   w.xterm.options.lineHeight=c.lineHeight;
+   w.xterm.options.theme={background:bg,foreground:fg};
+   termFit(w);
+  }catch(e){}
+ });
  document.querySelectorAll('#term .term-out, #term .term-inbar input, #term .term-ps').forEach(e=>{
   e.style.lineHeight=c.lineHeight;e.style.letterSpacing=c.letterSpacing+'px';e.style.fontSize=c.fontSize+'px';
   e.style.background=c.background;e.style.color=c.foreground;
-  e.style.fontFamily=c.fontFamily.map(f=>/[ ,]/.test(f)?`"${f}"`:f).join(', ');
+  e.style.fontFamily=fam;
  });
  const em=document.getElementById('term-empty');if(em)em.style.background=c.background;
 }
@@ -17870,7 +18242,7 @@ function field(label, id, ph){return `<div style="display:flex;align-items:cente
 // ---- 多机管理行操作: 终端 / 日志 / 重启(本机走 term,sudo fallback; 远端返回待接) ----
 async function runTerm(host,cmd){const r=await fetch('/api/term',{method:'POST',headers:{'Content-Type':'application/json','X-Fleet-Token':TOK},body:JSON.stringify({host:host||'this',cmd})});const d=await r.json();
  return d.done?((d.rc+'\n'+d.out).slice(0,1800)):('(通道不可用) '+(d.msg||''));}
-async function hTerm(host){const c=prompt('在 '+host+' 执行命令','hostname');if(c===null)return;alert(c+'\n'+await runTerm(host,c));}
+function hTerm(host){show('term');termInit();termOpenNode(host||'');}
 async function hLogs(host){const out=await runTerm(host,'tail -n 60 /tmp/fleet-panel.log 2>/dev/null || journalctl -n 60 --no-pager 2>/dev/null');prompt(host+' 日志(尾部)',out);}
 async function hReboot(host){const svc=prompt('重启 '+host+' 上的哪个服务？(systemd 单元名，如 nginx)','');if(!svc)return;
  if(!/^[a-zA-Z0-9_.@-]+$/.test(svc))return alert('服务名不合法');
