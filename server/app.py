@@ -821,6 +821,38 @@ def _wmon_rows():
     return out
 
 
+# 远端执行通道: 面板机对节点机的 SSH 免密(部署时把 fleet 公钥写进节点 root 的
+# [authorized-keys])。agent.py 只做「上报 + 白名单自愈」, 不放行任意 shell, 所以远端
+# 终端不再等 agent, 直接复用面板已有的 SSH 通道。
+NODE_KEY = os.environ.get("FLEET_NODE_KEY", os.path.expanduser("~/.ssh/fleet_ed25519"))
+NODE_USER = os.environ.get("FLEET_NODE_USER", "root")
+
+
+def _node_login(host):
+    """host(节点名/IP) → (addr, 终端主机记录 or None)。先查 hosts 表, 再查终端主机配置。"""
+    h = str(host or "").strip()
+    if not h:
+        return None, None
+    addr = None
+    try:
+        row = db().execute("SELECT ip FROM hosts WHERE name=? OR ip=?", (h, h)).fetchone()
+        if row and row[0]:
+            addr = row[0]
+    except Exception:
+        pass
+    rec = None
+    try:
+        rec = next((x for x in _term_load()["hosts"]
+                    if h in (x.get("name"), x.get("addr"), x.get("id"))), None)
+    except Exception:
+        pass
+    if not addr and rec:
+        addr = rec.get("addr")
+    if not addr and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", h):
+        addr = h
+    return addr, rec
+
+
 def term_run(host, cmd, sudo=False):
     # 本机
     if host in ("", "this", "home-4c31g", socket.gethostname()):
@@ -833,8 +865,31 @@ def term_run(host, cmd, sudo=False):
                     "out": (r.stdout + r.stderr)[-4000:]}
         except Exception as e:
             return {"ok": True, "done": True, "rc": -1, "out": f"ERR {e}"}
-    # 其他机: 走 agent 查询入口(留接口, agent 端实现见 agent.py)
-    return {"ok": True, "done": False, "msg": f"host {host} 需 agent 通道(未接入)"}
+    # 远端节点: 走 SSH 免密(有密码主机则走 sshpass)
+    addr, rec = _node_login(host)
+    if not addr:
+        return {"ok": True, "done": False, "msg": f"未找到节点 {host} 的地址(先在节点管理里纳管)"}
+    full = ("sudo -n " + cmd) if sudo else cmd
+    if rec and rec.get("auth") == "password" and rec.get("password"):
+        r = ssh_exec(rec, full, timeout=60, pwd=rec["password"])
+    else:
+        args = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR"]
+        if os.path.isfile(NODE_KEY):
+            args += ["-i", NODE_KEY, "-o", "IdentitiesOnly=yes"]
+        try:
+            p = _sp.run(args + [f"{NODE_USER}@{addr}", full],
+                        capture_output=True, text=True, timeout=60)
+            r = {"ok": True, "rc": p.returncode, "out": (p.stdout + p.stderr)[-4000:]}
+        except _sp.TimeoutExpired:
+            r = {"ok": False, "rc": -1, "out": "执行超时"}
+        except Exception as e:
+            r = {"ok": False, "rc": -1, "out": f"ERR {e}"}
+    # ssh 自身失败(rc=255)视为通道不可达, 让前端提示而不是当成命令输出
+    if not r.get("ok") or r.get("rc") == 255:
+        return {"ok": True, "done": False, "node": addr,
+                "msg": f"节点 {host}({addr}) SSH 通道不可达: {str(r.get('out','')).strip()[-300:]}"}
+    return {"ok": True, "done": True, "rc": r.get("rc", -1), "out": r.get("out", ""), "node": addr}
 
 import tempfile
 
@@ -2584,6 +2639,77 @@ def report(host, ip, inet, metrics):
     c.execute("DELETE FROM events WHERE at < ?", (int(time.time())-86400,))
     c.commit()
     return {"ok": True, "sev": sev, "alerts": alerts}
+
+# ---------- 节点巡检 (SSH 直采) ----------
+# agent.py 只在设计里, 没有部署到任何节点(节点上没有 fleet-agent 进程/systemd 单元),
+# 所以 hosts 表的行一直是初始值 —— 面板上「正常」其实是没数据。这里改用面板已有的
+# SSH 免密通道直接采集 load/mem/disk/docker, 结果走同一个 report() 落库+告警,
+# 与 agent 上报的语义完全一致, 只是采集端换成面板自己。
+NODE_POLL_SEC = int(os.environ.get("FLEET_NODE_POLL", "90"))
+# 用 base64 包一层再交给 ssh, 避免多层引号被 sshd 的 bash -c 拆坏
+_NODE_PROBE_SH = (
+    "cut -d' ' -f1 /proc/loadavg\n"
+    "free -k | awk '/^Mem:/{printf \"%.1f\\n\", 100*$3/$2}'\n"
+    "df -P / | awk 'NR==2{gsub(\"%\",\"\",$5);print $5}'\n"
+    "docker ps -q 2>/dev/null | wc -l\n"
+)
+_NODE_PROBE_CMD = "echo %s | base64 -d | bash | paste -sd'|' -" % \
+    __import__("base64").b64encode(_NODE_PROBE_SH.encode()).decode()
+_NODE_STATE = {}
+
+
+def _ping_ms(addr, timeout=2, count=3):
+    """ICMP 往返延迟(ms)。量网络, 不量 ssh 握手 —— 用 ssh 耗时当延迟会让所有节点误报。
+    单包会被链路抖动/丢包带偏(香港线丢包 50%, 单发经常采空变成 0), 发 3 包取最小值。"""
+    try:
+        r = _sp.run(["ping", "-n", "-c", str(count), "-i", "0.3", "-W", str(timeout), addr],
+                    capture_output=True, text=True, timeout=timeout * count + 4)
+        hits = [float(x) for x in re.findall(r"time=([\d.]+)", r.stdout)]
+        if hits:
+            return round(min(hits), 1)
+    except Exception:
+        pass
+    return 0.0
+
+
+def node_poll_once():
+    c = db()
+    rows = c.execute("SELECT name,ip,inet FROM hosts").fetchall()
+    me = socket.gethostname()
+    for name, ip, inet in rows:
+        local = (name == me) or ip in ("10.8.0.1", "127.0.0.1")
+        # 本机也采一遍(不跳过), 否则本机那行的数据会停在上次部署时, 越放越旧
+        r = term_run("this" if local else name, _NODE_PROBE_CMD)
+        if r.get("done"):
+            try:
+                load1, mem, disk, dc = str(r.get("out", "")).strip().splitlines()[-1].split("|")
+                report(name, ip, inet, {"load1": float(load1), "mem": float(mem),
+                                        "disk": float(disk), "docker": int(dc),
+                                        "latency": 0.0 if local else _ping_ms(ip)})
+                _NODE_STATE[name] = "ok"
+                continue
+            except Exception as e:
+                msg = f"巡检解析失败: {e}"
+        else:
+            msg = r.get("msg") or "SSH 通道不可达"
+        # 采不到 = 真的失联, 不能继续显示上次的「正常」
+        if _NODE_STATE.get(name) != "down":
+            log_event(name, "crit", f"节点失联: {msg}"[:200])
+        _NODE_STATE[name] = "down"
+        c.execute("UPDATE hosts SET sev='crit', alerts=4, at=? WHERE name=?", (int(time.time()), name))
+        c.commit()
+
+
+def _node_poll_loop():
+    time.sleep(15)   # 等 app 起好再开跑
+    while True:
+        try:
+            node_poll_once()
+        except Exception as e:
+            print(f"[node-poll] {e}", flush=True)
+        time.sleep(max(30, NODE_POLL_SEC))
+
+threading.Thread(target=_node_poll_loop, daemon=True).start()
 
 # ---------- Flask ----------
 def make_app():
@@ -17621,12 +17747,13 @@ async function ndload(){
  const rows=hosts.filter(h=>!kw||(h.name||'').toLowerCase().includes(kw)||(h.ip||'').includes(kw)).map(h=>{
    const ok=h.sev=='ok',st=ok?'正常':h.sev==='warn'?'警告':'异常';
    const sevcls=h.sev?h.sev:'ok';
-   const cpu=h.load1==null?'-':(h.load1*(ov.cores||1)).toFixed(2)+'%';
+   // 每台节点的核数/内存总量都不一样, 这里只展示该节点自己的绝对量, 不套本机数据
+   const cpu=h.load1==null?'-':Number(h.load1).toFixed(2);
    return `<tr>
     <td><b>${h.name}</b> <span class="mb8">${h.inet||''}</span></td>
     <td><span class="sev sev-${sevcls}">${st}</span> <span class="mb8">${h.ip||'-'}</span></td>
     <td class="mb8">v2.4.2</td>
-    <td><span>CPU <b>${cpu}</b> / ${ov.cores||'-'} 核</span><span class="mb8" style="margin-left:10px">| 内存 <b>${h.mem==null?'-':h.mem+'%'}</b> / ${fmtB((ov.mem||{}).total||0)}</span></td>
+    <td><span>CPU 负载 <b>${cpu}</b></span><span class="mb8" style="margin-left:10px">| 内存 <b>${h.mem==null?'-':h.mem+'%'}</b></span><span class="mb8" style="margin-left:10px">| 磁盘 <b>${h.disk==null?'-':h.disk+'%'}</b></span></td>
     <td><a class="btn link" onclick="hTerm('${(h.name||'').replace(/'/g,'')}')">终端</a> <a class="btn link" onclick="hLogs('${(h.name||'').replace(/'/g,'')}')">日志</a> <a class="btn link" onclick="hReboot('${(h.name||'').replace(/'/g,'')}')">重启</a></td>
    </tr>`;});
  const ntb=document.getElementById('node-tb');
@@ -17722,21 +17849,21 @@ function ndDbInfo(n){
 async function ndNodesLoad(){
  const tb=document.getElementById('nd-node-tb');if(!tb)return;
  let hosts=[];try{hosts=(await (await fetch('/api/hosts')).json())||[];}catch(e){}
- tb.innerHTML=hosts.map(h=>`<tr><td><b>${h.name}</b></td><td class="mb8">${h.ip||'-'}</td><td class="mb8">主节点</td>
+ tb.innerHTML=hosts.map(h=>`<tr><td><b>${h.name}</b></td><td class="mb8">${h.ip||'-'}</td><td class="mb8">${h.ip==='10.8.0.2'?'主节点':'节点'}</td>
   <td><span class="sev sev-${h.sev||'ok'}">${h.sev==='ok'?'正常':h.sev==='warn'?'警告':'异常'}</span></td>
   <td class="mb8">v2.4.2</td>
-  <td><a class="btn link" onclick="hTerm('${h.name}')">终端</a> <a class="btn link" onclick="hReboot('${h.name}')">重启</a></td></tr>`).join('')
+  <td><a class="btn link" onclick="hTerm('${h.name}')">终端</a> <a class="btn link" onclick="hLogs('${h.name}')">日志</a> <a class="btn link" onclick="hReboot('${h.name}')">重启</a></td></tr>`).join('')
   ||'<tr><td colspan=6 class="empty">暂无数据</td></tr>';
  const tot=document.getElementById('nd-node-total');if(tot)tot.textContent='共 '+hosts.length+' 条';
 }
 function ndNodeAdd(){
  const addr=location.origin, tok=TOK.slice(0,8)+'…';
  fpDrawer('添加节点','',`<div class="fp-form" style="padding:16px">
-  <p style="color:var(--text2);font-size:13px;margin-bottom:10px">被管节点需能访问主节点面板地址，并使用同一接入 Token 注册。</p>
+  <p style="color:var(--text2);font-size:13px;margin-bottom:10px">纳管方式：面板机用 SSH 免密(root + ~/.ssh/fleet_ed25519)直连节点，采集指标和执行终端命令都走这条通道。</p>
   <p><b>主节点地址：</b>${addr}</p>
   <p><b>接入 Token：</b>${tok} <a class="btn link" onclick="ndCopy('${TOK}')">复制</a></p>
-  <p><b>通信方式：</b>HTTP / WebSocket（默认端口 ${location.port||80}）</p>
-  <p style="color:var(--text3);font-size:12px;margin-top:10px">当前版本仅支持主节点本机纳管；添加远端节点需安装 fleet-agent 后自动注册。</p></div>`);}
+  <p><b>节点需满足：</b>面板机公钥已写入节点的 /root/.ssh/[authorized-keys]，且节点可达面板所在网络(WG 10.8.0.0/24)。</p>
+  <p style="color:var(--text3);font-size:12px;margin-top:10px">满足后在 hosts 表登记节点名与地址即可，面板每 ${'90'} 秒巡检一次。</p></div>`);}
 function ndCopy(t){if(navigator.clipboard){navigator.clipboard.writeText(t).then(()=>fpToast('已复制到剪贴板')).catch(()=>fpToast('复制失败','error'));}else fpToast('当前环境不支持剪贴板','error');}
 function ndNodeGen(){ndNodeAdd();}
 async function ndPanelsLoad(){
@@ -17779,10 +17906,14 @@ async function agLogs(name){const out=await runTerm(name==='this'?'':name,'tail 
 function field(label, id, ph){return `<div style="display:flex;align-items:center;gap:8px;margin:6px 0"><span style="min-width:92px;color:var(--text2);font-size:13px">${label}</span><input id=${id} class="ipt" style="flex:1;max-width:320px" placeholder="${ph||''}"></div>`;}
 // ---- 多机管理行操作: 终端 / 日志 / 重启(本机走 term,sudo fallback; 远端返回待接) ----
 async function runTerm(host,cmd){const r=await fetch('/api/term',{method:'POST',headers:{'Content-Type':'application/json','X-Fleet-Token':TOK},body:JSON.stringify({host:host||'this',cmd})});const d=await r.json();
- return d.done?((d.rc+'\n'+d.out).slice(0,1800)):('(远端待 agent 接入) '+(d.msg||''));}
+ return d.done?((d.rc+'\n'+d.out).slice(0,1800)):('(通道不可用) '+(d.msg||''));}
 async function hTerm(host){const c=prompt('在 '+host+' 执行命令','hostname');if(c===null)return;alert(c+'\n'+await runTerm(host,c));}
 async function hLogs(host){const out=await runTerm(host,'tail -n 60 /tmp/fleet-panel.log 2>/dev/null || journalctl -n 60 --no-pager 2>/dev/null');prompt(host+' 日志(尾部)',out);}
-async function hReboot(host){if(!confirm('重启 '+host+' 的服务自愈? '))return;const out=await runTerm(host,'echo ok');alert('已下发重启指令\n'+out);}
+async function hReboot(host){const svc=prompt('重启 '+host+' 上的哪个服务？(systemd 单元名，如 nginx)','');if(!svc)return;
+ if(!/^[a-zA-Z0-9_.@-]+$/.test(svc))return alert('服务名不合法');
+ if(!confirm('确认重启 '+host+' 的 '+svc+' 服务？'))return;
+ const out=await runTerm(host,'systemctl restart '+svc+' 2>&1; systemctl is-active '+svc);
+ alert('重启 '+host+' 的 '+svc+'\n'+out);}
 // ---- 模型账号 / MCP / 模板 / 运行环境 / APP Key / 资源同步 / 高可用 ----
 function mkCols(){return {models:['名称','模型供应商','API 类型','Base URL','API Key','验证状态','时间'],
  mcp:['名称','外部连接地址','状态','日志','时间'],
