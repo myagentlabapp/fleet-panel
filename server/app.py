@@ -9506,9 +9506,6 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
 .metric-label{font-size:13px;color:rgb(144,147,153)}
 .metric-value{font-size:26px;font-weight:600;margin-top:8px;color:var(--text,#303133)}
 
-.aigw-alert{display:flex;align-items:flex-start;gap:8px;padding:8px 16px;border-radius:4px;background:rgba(89,71,42,.15);color:rgb(237,172,44);font-size:14px;margin-bottom:16px}
-.aigw-alert .el-link__inner{color:rgb(237,172,44);cursor:pointer}
-.aigw-alert .el-alert__close-btn{cursor:pointer;opacity:.7}
 .aigw-status-card .btn.primary{background:transparent;border:none;color:var(--primary,#005eeb);padding:0 12px}
 .aigw-div{display:inline-block;width:1px;height:14px;background:var(--border,#dcdfe6);margin:0 2px;vertical-align:middle}
 .aigw-sel{height:32px;line-height:32px;padding:0 12px;border:1px solid var(--border,#dcdfe6);border-radius:4px;cursor:pointer;color:var(--text3);font-size:13px}
@@ -10440,7 +10437,6 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
  <div class="main">
  <div class="content">
    <div id="overview" class="view">
-    <div class="el-alert warn" style="margin-bottom:10px"><span>⚠️</span><div>温馨提醒：企业版许可证将于 [7] 天后到期，届时将停止使用所有企业版功能。</div></div>
     <div class="card pane router_card">
      <div class="body node-rt">
       <div class="el-radio-group" role="radiogroup">
@@ -10561,9 +10557,6 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
       <select id=nd-sel class="sel" style="height:34px" onchange="ndsel(this.value)"><option>主节点</option></select>
      </div>
     </div>
-    <div class="el-alert warn" id="nd-lic" style="align-items:center;margin-bottom:10px">
-      <span>⚠️</span><div style="flex:1">温馨提醒：企业版许可证将于 [5] 天后到期，届时将停止使用所有企业版功能。 <a class="btn link" onclick="show('cfg')">快速跳转</a></div>
-      <a class="btn link" onclick="document.getElementById('nd-lic').style.display='none'">✕</a></div>
     <div id="nd-pane-overview">
     <div class="card pane nd-main">
      <div class="head"><h2>多机管理</h2>
@@ -11738,9 +11731,6 @@ Filesystem      Size  Used Avail Use% Mounted on
     <div class="router_card"><div class="el-radio-group" role="radiogroup">
       <label class="el-radio-button is-active el-radio-button--large"><input class="el-radio-button__original-radio" type="radio" name="apptab" value="APP" checked><span class="el-radio-button__inner">APP</span></label>
     </div></div>
-    <div class="el-alert warn" id="app-lic" style="align-items:center;margin-bottom:10px">
-      <span>⚠️</span><div style="flex:1">温馨提醒：企业版许可证将于 [5] 天后到期，届时将停止使用所有企业版功能。 <a class="btn link" onclick="show('cfg')">快速跳转</a></div>
-      <a class="btn link" onclick="document.getElementById('app-lic').style.display='none'">✕</a></div>
     <div class="card pane">
      <div class="head"><h2>APP</h2></div>
      <div class="body">
@@ -11840,9 +11830,6 @@ Filesystem      Size  Used Avail Use% Mounted on
       <label class="el-radio-button el-radio-button--large router_card_button" onclick="syTab('应用对传')"><input class="el-radio-button__original-radio" type="radio" value="应用对传"><span class="el-radio-button__inner">应用对传</span></label>
       <label class="el-radio-button el-radio-button--large router_card_button" onclick="syTab('证书同步')"><input class="el-radio-button__original-radio" type="radio" value="证书同步"><span class="el-radio-button__inner">证书同步</span></label>
     </div></div>
-    <div class="el-alert warn" id="sy-lic" style="align-items:center">
-      <span>⚠️</span><div style="flex:1">温馨提醒：企业版许可证将于 [5] 天后到期，届时将停止使用所有企业版功能。 <a class="btn link" onclick="show('cfg')">快速跳转</a></div>
-      <a class="btn link" onclick="document.getElementById('sy-lic').style.display='none'">✕</a></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
      <div class="card pane" style="margin:0"><div class="body">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
@@ -11883,9 +11870,6 @@ Filesystem      Size  Used Avail Use% Mounted on
       <label class="el-radio-button el-radio-button--large router_card_button"><input class="el-radio-button__original-radio" type="radio" value="网络"><span class="el-radio-button__inner">网络</span></label>
       <label class="el-radio-button el-radio-button--large router_card_button"><input class="el-radio-button__original-radio" type="radio" value="存储池"><span class="el-radio-button__inner">存储池</span></label>
     </div><div class="flex flex-col gap-2 sm:flex-row"></div></div></div></div>
-    <div class="el-alert warn" id="kvm-lic" style="align-items:center;margin-bottom:10px">
-     <span>⚠️</span><div style="flex:1">温馨提醒：企业版许可证将于 [5] 天后到期，届时将停止使用所有企业版功能。 <a class="btn link" onclick="show('cfg')">快速跳转</a></div>
-     <a class="btn link" onclick="document.getElementById('kvm-lic').style.display='none'">✕</a></div>
     <div class="card pane" id="kvm-env">
      <div class="body" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 16px">
       <span class="el-tag el-tag--success el-tag--dark" id="kvm-envtag">1Panel-kvm</span>
@@ -11927,9 +11911,6 @@ Filesystem      Size  Used Avail Use% Mounted on
       <label class="el-radio-button el-radio-button--large router_card_button"><input class="el-radio-button__original-radio" type="radio" value="PostgreSQL"><span class="el-radio-button__inner">PostgreSQL</span></label>
       <label class="el-radio-button el-radio-button--large router_card_button"><input class="el-radio-button__original-radio" type="radio" value="Redis"><span class="el-radio-button__inner">Redis</span></label>
      </div><div class="flex flex-col gap-2 sm:flex-row"></div></div></div></div>
-    <div class="el-alert warn" id="ha-lic" style="align-items:center;margin-bottom:10px">
-     <span>⚠️</span><div style="flex:1">温馨提醒：企业版许可证将于 [5] 天后到期，届时将停止使用所有企业版功能。 <a class="btn link" onclick="show('cfg')">快速跳转</a></div>
-     <a class="btn link" onclick="document.getElementById('ha-lic').style.display='none'">✕</a></div>
     <div class="card pane">
      <div class="head"><h2 id="ha-title">MySQL 集群</h2>
       <div class="acts"><a class="btn primary" onclick="haOpenForm()">添加集群</a><a class="btn ghost" onclick="haload()">刷新</a></div></div>
@@ -11941,9 +11922,6 @@ Filesystem      Size  Used Avail Use% Mounted on
     <div class="router_card el-card"><div class="el-card__body"><div class="flex w-full flex-col justify-start sm:items-center items-start sm:justify-between sm:flex-row"><div class="el-radio-group" role="radiogroup">
       <label class="el-radio-button is-active el-radio-button--large router_card_button"><input class="el-radio-button__original-radio" type="radio" value="界面设置" name="uiset-nav" checked><span class="el-radio-button__inner">界面设置</span></label>
     </div><div class="flex flex-col gap-2 sm:flex-row"></div></div></div></div>
-    <div class="el-alert warn" id="uiset-lic" style="align-items:center;margin-bottom:10px">
-     <span>⚠️</span><div style="flex:1">温馨提醒：企业版许可证将于 [5] 天后到期，届时将停止使用所有企业版功能。 <a class="btn link" onclick="show('cfg')">快速跳转</a></div>
-     <a class="btn link" onclick="document.getElementById('uiset-lic').style.display='none'">✕</a></div>
     <div class="card pane">
      <div class="body uiset-form">
       <div class="uiset-sec-title">Logo</div>
@@ -12081,9 +12059,6 @@ Filesystem      Size  Used Avail Use% Mounted on
    <div class="router_card"><div class="el-radio-group" role="radiogroup">
      <label class="el-radio-button is-active el-radio-button--large router_card_button"><input class="el-radio-button__original-radio" type="radio" name="skillstab" value="Skills Hub" checked onclick="skillsTab('Skills Hub')"><span class="el-radio-button__inner">Skills Hub</span></label>
    </div></div>
-   <div class="el-alert warn" id="skills-lic" style="align-items:center;margin-bottom:10px">
-     <span>⚠️</span><div style="flex:1">温馨提醒：企业版许可证将于 [5] 天后到期，届时将停止使用所有企业版功能。 <a class="btn link" onclick="show('cfg')">快速跳转</a></div>
-     <a class="btn link" onclick="document.getElementById('skills-lic').style.display='none'">✕</a></div>
    <div class="card pane">
     <div class="head"><h2>Skills Hub</h2>
      <div class="acts">
@@ -12107,9 +12082,6 @@ Filesystem      Size  Used Avail Use% Mounted on
    <div class="router_card"><div class="el-radio-group" role="radiogroup">
      <label class="el-radio-button is-active el-radio-button--large"><input class="el-radio-button__original-radio" type="radio" name="benchtab" value="基准测试" checked onclick="benchTab('基准测试')"><span class="el-radio-button__inner">基准测试</span></label>
    </div></div>
-   <div class="el-alert warn" id="bench-lic" style="align-items:center;margin-bottom:10px">
-     <span>⚠️</span><div style="flex:1">温馨提醒：企业版许可证将于 [5] 天后到期，届时将停止使用所有企业版功能。 <a class="btn link" onclick="show('cfg')">快速跳转</a></div>
-     <a class="btn link" onclick="document.getElementById('bench-lic').style.display='none'">✕</a></div>
    <div class="card pane">
     <div class="head"><h2>基准测试</h2>
      <div class="acts"><a class="btn primary" onclick="benchStart()">创建</a>
@@ -12130,10 +12102,6 @@ Filesystem      Size  Used Avail Use% Mounted on
      <label class="el-radio-button" onclick="usersTab('auth')"><input class="el-radio-button__original-radio" type="radio" name="users-tab"><span class="el-radio-button__inner">认证管理</span></label>
     </div>
    </div></div>
-   <div class="u-alert">
-    <span class="u-alert-txt">温馨提醒：企业版许可证将于 <b>[5]</b> 天后到期，届时将停止使用所有企业版功能。</span><a class="u-link" onclick="show('cfg');cfgTab('许可证')">快速跳转<svg viewBox="0 0 1024 1024"><path fill="currentColor" d="m249.6 417.088 319.744 43.072 39.168 310.272L845.12 178.88 249.6 417.088zm-129.024 47.168a32 32 0 0 1-7.68-61.44l777.792-311.04a32 32 0 0 1 41.6 41.6l-310.336 775.68a32 32 0 0 1-61.44-7.808L512 516.992l-391.424-52.736z"/></svg></a>
-    <svg class="u-close" viewBox="0 0 1024 1024" onclick="this.parentNode.style.display='none'"><path fill="currentColor" d="M764.288 214.592 512 466.88 259.712 214.592a31.936 31.936 0 0 0-45.12 45.12L466.752 512 214.528 764.224a31.936 31.936 0 1 0 45.12 45.184L512 557.184l252.288 252.288a31.936 31.936 0 0 0 45.12-45.12L557.12 512.064l252.288-252.352a31.936 31.936 0 1 0-45.12-45.184z"/></svg>
-   </div>
    <div class="u-card el-card"><div class="el-card__body">
     <div class="content-container__title">
      <div class="u-left"><a class="u-btn u-btn--primary" onclick="userCreate()">创建</a><a class="u-btn is-disabled" id="users-del" onclick="userDelSel()">删除</a></div>
@@ -12262,9 +12230,6 @@ Filesystem      Size  Used Avail Use% Mounted on
      <label class="el-radio-button el-radio-button--large router_card_button" onclick="reportGoto('导出历史')"><input class="el-radio-button__original-radio" type="radio" value="导出历史"><span class="el-radio-button__inner">导出历史</span></label>
      <label class="el-radio-button el-radio-button--large router_card_button" onclick="reportGoto('设置')"><input class="el-radio-button__original-radio" type="radio" value="设置"><span class="el-radio-button__inner">设置</span></label>
    </div></div>
-   <div class="el-alert warn" id="report-lic" style="align-items:center">
-    <span>⚠️</span><div style="flex:1">温馨提醒：企业版许可证将于 [5] 天后到期，届时将停止使用所有企业版功能。 <a class="btn link" onclick="show('cfg')">快速跳转</a></div>
-    <a class="btn link" onclick="document.getElementById('report-lic').style.display='none'">✕</a></div>
    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px">
     <a class="btn ghost" onclick="reportload()">刷新</a>
     <a class="btn ghost" onclick="reportExport()">导出</a>
@@ -12558,7 +12523,6 @@ function aigwOverview(body){
  var acc=d.accounts||[],ugs=d.usergroups||[],keys=d.apikeys||[];
  var u=(d.usage||{})[AIGW.range]||{};
  var h='';
- h+='<div class="el-alert aigw-alert" id="aigw-remind"><div style="flex:1"><span>温馨提醒：企业版许可证将于 [7] 天后到期，届时将停止使用所有企业版功能。</span></div><a class="el-link el-link--primary" onclick="aigwRemindJump()"><span class="el-link__inner">快速跳转</span></a><span class="el-alert__close-btn" onclick="document.getElementById(\'aigw-remind\').style.display=\'none\'">✕</span></div>';
  h+='<div class="card aigw-status-card" style="margin-bottom:16px"><div class="body" style="padding:16px 20px">';
  h+='<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">';
  h+='<span class="el-tag el-tag--success">AI 网关</span><span class="el-tag '+(on?'el-tag--success':'el-tag--danger')+'">'+(on?'已启动':'已停止')+'</span>';
@@ -12630,7 +12594,6 @@ function aigwTrendDraw(u){
  });
 }
 function aigwRange(r){AIGW.range=r;aigwOverview(document.getElementById('aigw-body'));}
-function aigwRemindJump(){show('cfg');fpToast('已跳转到面板设置，请在许可证中完成企业版配置');}
 function aigwStatus(){
  var g=(AIGW.d||{}).gateway||{};
  var rows=[['网关状态',g.status||'-'],['监听端口',g.port||'-'],['外部连接地址',g.external||'-'],['代理地址',g.proxy||'-'],
