@@ -2607,15 +2607,8 @@ def make_app():
 
     @app.get("/favicon.ico")
     def favicon():
-        # 内联生成 16x16 主题蓝 ICO,消除浏览器 favicon 404
-        import struct as _st
-        w = h = 16
-        px = bytes((0xeb, 0x5e, 0x00, 0xff)) * (w * h)      # BGRA of #005eeb
-        mask = b"\x00" * (w * h // 8)
-        bih = _st.pack("<IiiHHIIiiII", 40, w, h * 2, 1, 32, 0, len(px) + len(mask), 0, 0, 0, 0)
-        img = bih + px + mask
-        ico = _st.pack("<HHH", 0, 1, 1) + _st.pack("<BBBBHHII", w, h, 0, 0, 1, 32, len(img), 22) + img
-        return Response(ico, mimetype="image/x-icon")
+        # 返回品牌 SVG favicon，浏览器地址栏/标签页显示面板 Logo
+        return send_from_directory(os.path.join(os.path.dirname(__file__), "..", "static", "svg"), "favicon.svg", mimetype="image/svg+xml")
 
     @app.get("/assets/svg/<path:filename>")
     def assets_svg(filename):
@@ -8202,6 +8195,7 @@ def make_app():
 
 HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>1Panel</title>
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
  :root{
