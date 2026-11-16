@@ -16656,7 +16656,7 @@ function termTab(v){
  arr.forEach((k,i)=>{const p=document.getElementById('term-pane-'+k);if(p)p.style.display=k===v?'':'none';});
  if(v==='host')termApplyGroups(document.getElementById('term-host-g'),document.getElementById('term-host-gsel'));
  if(v==='command')termApplyGroups(document.getElementById('term-cmd-g'),document.getElementById('term-cmd-gsel'));
- if(v==='terminal'){termDrawWins();termChips();}
+ if(v==='terminal'){termDrawWins();termCmdLoad();termChips();}
  if(v==='config')termCfgLoad();
 }
 /* ---------- 通用抽屉 ---------- */
