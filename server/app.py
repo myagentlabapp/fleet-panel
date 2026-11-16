@@ -11864,12 +11864,6 @@ Filesystem      Size  Used Avail Use% Mounted on
       <div class="head"><h2>关于</h2></div>
       <div class="body">
        <table class="tbl" style="max-width:760px"><tbody id="cfg-about-tb"></tbody></table>
-       <div style="margin-top:14px;color:var(--text3);font-size:13px">
-        <a class="link" style="color:var(--primary)" href="https://fit2cloud.com/" target="_blank">了解商业版</a> ·
-        <a class="link" style="color:var(--primary)" href="https://bbs.fit2cloud.com/" target="_blank">论坛求助</a> ·
-        <a class="link" style="color:var(--primary)" href="https://1panel.cn/docs/" target="_blank">使用手册</a> ·
-        <a class="link" style="color:var(--primary)" href="https://github.com/1Panel-dev/1Panel" target="_blank">项目地址</a>
-       </div>
       </div>
      </div>
     </div>
@@ -12684,7 +12678,7 @@ Filesystem      Size  Used Avail Use% Mounted on
   </div>
  </div>
 
-<div class="footer app-footer"><div class="footer-content"><div class="footer-copyright"><a href="https://fit2cloud.com/" target="_blank"> Copyright © 2014-2026 飞致云</a></div><div class="footer-navigation footer-navigation-panel"><a class="el-link el-link--primary"><span class="el-link__inner"><span class="font-normal">了解商业版</span></span></a><div class="el-divider el-divider--vertical" role="separator"></div><a class="el-link el-link--primary"><span class="el-link__inner"><span class="font-normal">论坛求助</span></span></a><div class="el-divider el-divider--vertical" role="separator"></div><a class="el-link el-link--primary"><span class="el-link__inner"><span class="font-normal">使用手册</span></span></a><div class="el-divider el-divider--vertical" role="separator"></div><a class="el-link el-link--primary"><span class="el-link__inner"><span class="font-normal">项目地址</span></span></a><div class="el-divider el-divider--vertical footer-navigation__tail" role="separator"></div></div><div class="footer-upgrade"><div class="flex flex-wrap items-center"><div class="flex flex-wrap items-center"><a class="el-link el-link--primary"><span class="el-link__inner">企业版</span></a><a class="el-link el-link--primary version"><span class="el-link__inner">v2.4.2</span></a><div class="el-badge -mt-0.5"><a class="el-link el-link--primary ml-2"><span class="el-link__inner">更新</span></a><sup class="el-badge__content el-badge__content--danger is-fixed is-dot" style="margin-right: 0px; margin-top: 0px;"></sup></div></div></div></div></div></div>
+<div class="footer app-footer"><div class="footer-content"><div class="footer-copyright">fleet-panel · 多机运维面板 · v2.4.2</div></div></div>
  </div>
 </div><script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
