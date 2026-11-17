@@ -17,7 +17,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 基于 / 借鉴 1Panel 社区版 (GPL-3.0) 改编，所有引用内容已按 GPL-3.0 保留版权声明。
 
 启动:  python3 app.py [--port 8ghz]
-依赖:  flask(已装)。数据落在 data/ 下 sqlite,前端走 / 的 SPA 页(无构建)。
+依赖:  flask。数据落在 data/ 下 sqlite,前端走 / 的 SPA 页(无构建)。
 入口:
   POST /api/agent/report          agent 上报主机状态(load/mem/disk/docker/latency)
   GET  /api/hosts                 总览: 全主机最新状态 + 健康 flag
@@ -39,7 +39,7 @@ os.makedirs(DATA, exist_ok=True)
 
 # ---------- Docker 网关 (通过 docker.sock / CLI) ----------
 def _docker(args, timeout=40, host=""):
-    """返回 (ok, text)。host 空 = 本机(行为与历史完全一致); host 非空 = 走 SSH 在远端节点执行。
+    """返回 (ok, text)。host 空 = 本地(行为与历史完全一致); host 非空 = 走 SSH 在远端节点执行。
     远端复用 term_run 的免密通道(fleet_ed25519), 命令整体 base64 包裹防引号拆坏。"""
     if not host or host in ("", "this", "home-4c31g", socket.gethostname()):
         base = ["docker"]
@@ -222,7 +222,7 @@ def _container_networks(ids):
 
 def _split_ports(text):
     """'0.0.0.0:8080->8080/tcp, :::8080->8080/tcp' -> 两个 chip(1Panel 也是分开显示 v4/v6)
-    真实面板 /containers/container 端口列: 每个绑定一个 el-button, 不做 IPv6 去重。"""
+    面板 /containers/container 端口列: 每个绑定一个 el-button, 不做 IPv6 去重。"""
     if not text:
         return []
     seen, out = set(), []
@@ -277,7 +277,7 @@ def _save_remarks(m):
     json.dump(m, open(REMARK_FILE, "w"), ensure_ascii=False, indent=2)
 
 def docker_action(cid, op):
-    """对标 1Panel 状态下拉: 启动/停止/重启/强制停止/暂停/恢复"""
+    """Docker 容器操作: 启动/停止/重启/强制停止/暂停/恢复"""
     if op not in _DOCKER_OPS:
         return {"ok": False, "error": "unknown op"}
     ok, out = _docker(_DOCKER_OPS[op] + [cid])
@@ -306,7 +306,7 @@ def docker_mounts(cid):
     return {"ok": True, "mounts": rows}
 
 def docker_remark(cid, remark):
-    """容器列表「描述」列的 inline 编辑(对标 fu-input-rw-switch), 落在 fleet 自己的 store。"""
+    """容器列表「描述」列的 inline 编辑, 落在 fleet 自己的 store。"""
     m = _load_remarks()
     m[cid] = remark
     _save_remarks(m)
@@ -348,7 +348,7 @@ def _fmt_time(s):
         return s or "-"
 
 def docker_networks():
-    """容器 > 网络 (对标 1Panel: 名称/模式/子网/网关/标签/时间/操作)"""
+    """容器 > 网络 """
     ok, out = _docker(["network", "inspect", "--format",
         "{{.Id}}|{{.Name}}|{{.Driver}}|{{.Created}}|"
         "{{range $k,$v := .Labels}}{{$k}}={{$v}};{{end}}|"
@@ -482,7 +482,7 @@ def template_rm(name):
 DAEMON_JSON = "/etc/docker/daemon.json"
 
 def docker_df():
-    """容器 > 概览 磁盘占用 (对标 1Panel docker system df)"""
+    """容器 > 概览 磁盘占用 """
     ok, out = _docker(["system", "df", "--format", "{{.Type}}|{{.TotalCount}}|{{.Size}}|{{.Reclaimable}}"])
     rows = []
     if ok:
@@ -515,7 +515,7 @@ def docker_vol_new(name):
     return {"ok": ok, "error": "" if ok else out, "out": out}
 
 def docker_run(d):
-    """创建并启动容器 (对标 1Panel 创建容器)"""
+    """创建并启动容器 """
     name = (d.get("name") or "").strip()
     image = (d.get("image") or "").strip()
     if not name or not image:
@@ -549,7 +549,7 @@ def docker_import(path, repo):
     return {"ok": ok, "error": "" if ok else out[-400:]}
 
 def docker_config():
-    """容器 > 配置 (对标 1Panel Docker 配置页)"""
+    """容器 > 配置 """
     ver = _docker(["info", "--format", "{{.ServerVersion}}"])[1].strip()
     enabled = _docker(["info", "--format", "ok"])[0]
     raw = ""
@@ -633,7 +633,7 @@ def compose_down(name):
 # 站点管理类比 1Panel「网站」模块: 类型 = 反向代理 | 静态 | 应用(runenv)
 SITES_DIR = DATA + "/sites"; os.makedirs(SITES_DIR, exist_ok=True)
 CERTS_DIR = DATA + "/certs"   # 证书部署目录 (F 模块 deploy 产物), nginx_conf 用
-NGINX_RELOAD = os.environ.get("FLEET_NGINX_RELOAD", "")   # 若配了 host 侧 nginx reload 命令则用, 否则只落盘
+NGINX_RELOAD = os.environ.get("FLEET_NGINX_RELOAD", "")   # 若配了 host 侧 nginx reload 命令则用, 否则只存储
 NGINX_BIND   = os.environ.get("FLEET_NGINX_BIND", "")     # nginx 监听 IP; 留空则 0.0.0.0. 多 IP 机上建议绑专属 IP 避开其他 443 占用
 
 # 应用商店模板(1Panel 应用商店的迷你集, compose 模板)
@@ -762,7 +762,7 @@ def nginx_conf(rec):
     elif rec.get("upstream"):
         srv += (f'  location / {{ proxy_pass {rec["upstream"]};\n'
                 f'    proxy_set_header Host $host;\n  }}\n')
-    # WAF 规则: 命中即 403（对标 1Panel 防护策略）
+    # WAF 规则: 命中即 403（
     if rec.get("waf_enabled"):
         for rule in (rec.get("waf_rules") or ["/\.env","/\.git","/wp-login","/phpmyadmin","/\.htaccess","/\.bak","/\.sql"]):
             srv += f'  location ~ {rule} {{ return 403; }}\n'
@@ -787,11 +787,11 @@ def site_toggle(name, enable):
 
 # ---------- Web 终端 (D2) ----------
 # 每台机装 agent(fleet-agent)会开一条通道, 让面板能对它执行 shell。
-# 面板直接对本机执行 + 通过 agent 遥控他机。commond 白名单/非交互(防注入)。
+# 面板直接对本地执行 + 通过 agent 遥控他机。commond 白名单/非交互(防注入)。
 import shlex
 
 def _nginx_log_lines(limit=60 * 1024 * 1024):
-    """读取真实 nginx 访问日志尾部。宿主 /var/log/nginx/access.log 或其 docker 卷内日志, 找不到返回空。"""
+    """读取 nginx 访问日志尾部。宿主 /var/log/nginx/access.log 或其 docker 卷内日志, 找不到返回空。"""
     cands = ["/var/log/nginx/access.log", "/var/log/nginx/fleet-access.log"]
     try:
         r = _sp.run(["docker", "inspect", "fleet-nginx", "--format", "{{range .Mounts}}{{.Source}}{{println}}{{end}}"],
@@ -879,7 +879,7 @@ def _node_login(host):
 
 
 def term_run(host, cmd, sudo=False):
-    # 本机
+    # 本地
     if host in ("", "this", "home-4c31g", socket.gethostname()):
         full = cmd
         if sudo:
@@ -1027,7 +1027,7 @@ def term_host_save(d, hid=None):
         if h["group"] not in groups:
             groups.append(h["group"]); db["groups"] = groups
         if not h["remember"]:
-            pass  # 仅本次会话使用,不落盘密码
+            pass  # 仅本次会话使用,不存储密码
         old = next((x for x in db["hosts"] if x["id"] == h["id"]), None)
         if old:
             # 前端传 *** 表示密码未改动
@@ -1131,7 +1131,7 @@ def term_config_set(d):
     return {"ok": True, "config": cfg}
 
 def term_exec(hid, cmd, timeout=60):
-    """执行命令: hid='local' 本机; 否则查找主机记录走 ssh"""
+    """执行命令: hid='local' 本地; 否则查找主机记录走 ssh"""
     cmd = cmd or ""
     if hid in ("", "local", "this", "localhost"):
         try:
@@ -1990,7 +1990,7 @@ NOTIFY = {
 # ---------- H: 多用户 + RBAC + 审计 ----------
 USERS_FILE = DATA + "/users.json"
 SESS = {}          # token -> username
-SESS_FILE = DATA + "/sessions.json"   # 持久化登录会话，重启面板后浏览器不用重新登录
+SESS_FILE = DATA + "/sessions.json"   # 持久登录会话，重启面板后浏览器不用重新登录
 try:
     SESS = json.load(open(SESS_FILE)) if os.path.exists(SESS_FILE) else {}
 except Exception:
@@ -1998,7 +1998,7 @@ except Exception:
 def _save_sess():
     try: json.dump(SESS, open(SESS_FILE, "w"))
     except Exception: pass
-# ---------- Skills Hub: 真实落盘 + 真实扫描 ----------
+# ---------- Skills Hub: 存储 + 扫描 ----------
 SKILLS_DIR = os.path.join(DATA, "skillfiles")
 SKILL_AGENT_DIR = os.path.expanduser("~/.claude/skills")
 
@@ -2025,7 +2025,7 @@ def _skill_parse_md(path):
 
 
 def _skills_scan_real():
-    """扫描本机真实存在的 SKILL.md, 作为 Skills Hub 的初始清单(不是造数据)。"""
+    """扫描本地真实存在的 SKILL.md, 作为 Skills Hub 的初始清单。"""
     import glob as _g
     roots = [os.path.expanduser("~/.claude/skills")]
     roots += _g.glob(os.path.expanduser("~/.claude/plugins/marketplaces/*/plugins/*/skills/*"))
@@ -2047,7 +2047,7 @@ def _skills_scan_real():
 
 
 def _skills_rows():
-    """首次访问时扫描本机真实 SKILL.md 建库并落盘; 之后一律以 data/skills.json 为准(删空也不复活)。"""
+    """首次访问时扫描本地真实 SKILL.md 建库并存储; 之后一律以 data/skills.json 为准(删空也不复活)。"""
     if not os.path.exists(_store_path("skills")):
         _save_col("skills", _skills_scan_real())
     return _col("skills")
@@ -2127,7 +2127,7 @@ def _client_geo():
     ip = (request.headers.get("X-Real-IP") or request.headers.get("X-Forwarded-For")
           or request.remote_addr or "").split(",")[0].strip()
     if ip.startswith("::ffff:"): ip = ip[7:]
-    if ip in ("127.0.0.1", "::1", "localhost"): return "127.0.0.1", "本机"
+    if ip in ("127.0.0.1", "::1", "localhost"): return "127.0.0.1", "本地"
     if ip.startswith("192.168.") or ip.startswith("10.") or re.match(r"^172\.(1[6-9]|2\d|3[01])\.", ip):
         return ip, "内网 IP"
     return ip, "未知"
@@ -2238,7 +2238,7 @@ def user_role(name, role, desc=None):
     _audit("info", _session_user(request.headers) or "admin", f"修改用户 [{name}] 权限为 {ROLE_LABEL.get(role, role)}", source="users", operate="edit", detail_en=f"Update user [{name}] role={role}")
     return {"ok": True}
 
-# ---- 认证管理 (AD/LDAP) 配置: 持久化到 data/users_auth.json ----
+# ---- 认证管理 (AD/LDAP) 配置: 持久到 data/users_auth.json ----
 AUTH_FILE = DATA + "/users_auth.json"
 AUTH_DEFAULT = {"provider": "ldap", "enabled": False, "server": "", "binddn": "", "bindpwd": "",
                 "basedn": "", "filter": "(sAMAccountName=%(user)s)", "mapping": "{\n  \"name\": \"uid\"\n}",
@@ -2516,9 +2516,9 @@ def col_rm(name, key, val):
     return {"ok": True}
 
 
-# ---------- 模型账号 (对标本机「模型」-「模型账号」) ----------
+# ---------- 模型账号  ----------
 def _models_probe(rec):
-    """真实请求供应商 /models 接口。成功返回真实模型 ID 列表, 失败返回真实错误, 不伪造。"""
+    """请求供应商 /models 接口。成功返回真实模型 ID 列表, 失败返回真实错误, 不伪造。"""
     import urllib.request as _ur
     base = (rec.get("base_url") or "").strip().rstrip("/")
     key = (rec.get("api_key") or "").strip()
@@ -2573,7 +2573,7 @@ HA_TYPES = [("MySQL", ("mysql", "mariadb")),
 
 
 def _ha_node_state(node):
-    """节点地址 host:port，真实 TCP 探测；失败即未连接，不伪造。"""
+    """节点地址 host:port， TCP 探测；失败即未连接，不伪造。"""
     try:
         host, _, port = (node or "").rpartition(":")
         if not host:
@@ -2591,7 +2591,7 @@ def _ha_nodes_of(rec):
 
 
 def _ha_payload():
-    """集群清单(节点逐个真实探测) + 各类型已安装实例(来自数据库资产)。"""
+    """集群清单(节点逐个探测) + 各类型已安装实例(来自数据库资产)。"""
     apps = _load_dbassets()
     clusters = []
     for r in _col("ha"):
@@ -2930,7 +2930,7 @@ def node_poll_once():
     me = socket.gethostname()
     for name, ip, inet in rows:
         local = (name == me) or ip in ("10.8.0.1", "127.0.0.1")
-        # 本机也采一遍(不跳过), 否则本机那行的数据会停在上次部署时, 越放越旧
+        # 本地也采一遍(不跳过), 否则本地那行的数据会停在上次部署时, 越放越旧
         r = term_run("this" if local else name, _NODE_PROBE_CMD)
         if r.get("done"):
             try:
@@ -3005,7 +3005,7 @@ def make_app():
     @app.get("/api/agents")
     def api_agents():
         if not need_auth(): return jsonify({"error":"unauth"}), 401
-        """智能体列表(对标本机 1Panel「智能体」)。"""
+        """智能体列表。"""
         return jsonify({"list": _col("agents")})
 
     @app.post("/api/agents")
@@ -3040,7 +3040,7 @@ def make_app():
 
     @app.post("/api/models/probe")
     def api_models_probe():
-        """真实请求供应商 /models 接口(创建/编辑抽屉的「获取模型」)。"""
+        """请求供应商 /models 接口(创建/编辑抽屉的「获取模型」)。"""
         if not _can_write(request.headers): return jsonify({"error": "forbidden"}), 403
         d = request.get_json(force=True, silent=True) or {}
         res = _models_probe(d)
@@ -3049,7 +3049,7 @@ def make_app():
 
     @app.post("/api/models/verify")
     def api_models_verify():
-        """验证模型账号: 真实请求 /models，结果落盘 data/models.json 的 verified 字段。"""
+        """验证模型账号: 请求 /models，结果存储 data/models.json 的 verified 字段。"""
         if not _can_write(request.headers): return jsonify({"error": "forbidden"}), 403
         d = request.get_json(force=True, silent=True) or {}
         name = (d.get("name") or "").strip()
@@ -3071,7 +3071,7 @@ def make_app():
     @app.get("/api/local-models")
     def api_local_models():
         if not need_auth(): return jsonify({"error":"unauth"}), 401
-        """本地模型(对标本机「模型」-「本地模型」): 真实探测本机 ollama/vllm 及已加载模型。
+        """本地模型: 探测本地 ollama/vllm 及已加载模型。
         空环境返回空列表, 前端渲染"暂无数据 / 未检测到本地推理服务"。"""
         out = []
         try:
@@ -3097,7 +3097,7 @@ def make_app():
     @app.get("/api/tamper/sites")
     def api_tamper_sites():
         if not need_auth(): return jsonify({"error":"unauth"}), 401
-        """网站防篡改「保护/排除模版」作用对象: 真实列出本站已部署网站目录。
+        """网站防篡改「保护/排除模版」作用对象: 列出本站已部署网站目录。
         openresty = 是否检测到 OpenResty(专业版未安装时整页只有安装引导空态);
         模版记录来自 data/tamper.json, 总防护/今日防护按创建时间真实统计。"""
         sites = sites_list().get("sites", [])
@@ -3125,7 +3125,7 @@ def make_app():
 
     @app.post("/api/tamper/tpl")
     def api_tamper_tpl():
-        """新增/删除防篡改模版(保护模版/排除模版/不刷新目录), 真实落盘 data/tamper.json。"""
+        """新增/删除防篡改模版(保护模版/排除模版/不刷新目录), 存储 data/tamper.json。"""
         if not _can_write(request.headers): return jsonify({"error": "forbidden"}), 403
         d = request.get_json(force=True, silent=True) or {}
         if d.get("op") == "rm":
@@ -3140,7 +3140,7 @@ def make_app():
 
     @app.post("/api/tamper/protect")
     def api_tamper_protect():
-        """为指定网站启用/关闭防篡改(真实写 site.json 记录)。"""
+        """为指定网站启用/关闭防篡改(写 site.json 记录)。"""
         if not _can_write(request.headers): return jsonify({"error": "forbidden"}), 403
         d = request.get_json(force=True, silent=True) or {}
         name = d.get("name"); on = bool(d.get("on"))
@@ -3173,7 +3173,7 @@ def make_app():
         if not _can_write(request.headers): return jsonify({"error":"forbidden"}), 403
         return jsonify(col_rm(col, "name", name))
 
-    @app.post("/api/mcp/test")   # MCP 连接测试: 按 SSE 地址真实探测
+    @app.post("/api/mcp/test")   # MCP 连接测试: 按 SSE 地址探测
     def api_mcp_test():
         if not _can_write(request.headers): return jsonify({"error":"forbidden"}), 403
         d = request.get_json(force=True, silent=True) or {}
@@ -3288,7 +3288,7 @@ def make_app():
     GPU_HIST_FILE = DATA + "/gpu_hist.json"
 
     def _gpu_probe():
-        """真实探测本机 GPU。返回 {"list":[...]} 或 {"error": "no gpu"}，绝不伪造。"""
+        """探测本地 GPU。返回 {"list":[...]} 或 {"error": "no gpu"}，绝不伪造。"""
         try:
             r = _sp.run(["bash", "-lc", "command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,bus_id --format=csv,noheader,nounits 2>/dev/null || (command -v rocm-smi >/dev/null 2>&1 && rocm-smi --showuse --showtemp --showmeminfo vram 2>/dev/null) || echo __NONE__"],
                         capture_output=True, text=True, timeout=15)
@@ -3344,7 +3344,7 @@ def make_app():
     @app.get("/api/waf/records")
     def api_waf_records():
         if not need_auth(): return jsonify({"error":"unauth"}), 401
-        """WAF 拦截记录: 解析真实 nginx 日志中 4xx/5xx 行 + 常见攻击特征串。"""
+        """WAF 拦截记录: 解析 nginx 日志中 4xx/5xx 行 + 常见攻击特征串。"""
         data = _nginx_log_lines()
         rows = []
         for l in data:
@@ -3426,7 +3426,7 @@ def make_app():
 
     @app.post("/api/waf/settings")
     def api_waf_settings_save():
-        """op 分发: global{...} / site+on / list{...} / list_rm / unblock, 落盘 data/waf.json。"""
+        """op 分发: global{...} / site+on / list{...} / list_rm / unblock, 存储 data/waf.json。"""
         if not _can_write(request.headers): return jsonify({"error":"forbidden"}), 403
         d = request.get_json(force=True, silent=True) or {}
         cfg = _waf_cfg()
@@ -3491,7 +3491,7 @@ def make_app():
         return ips
 
     def _sync_node(node):
-        """节点名 -> (是否本机, ssh 主机信息 dict|None)"""
+        """节点名 -> (是否本地, ssh 主机信息 dict|None)"""
         node = (node or "").strip()
         c = db()
         row = c.execute("SELECT name,ip FROM hosts WHERE name=? OR ip=?", (node, node)).fetchone()
@@ -3629,7 +3629,7 @@ def make_app():
         if not src or not dst:
             return jsonify({"ok": False, "error": "源路径和目标路径不能为空"})
         res = _sync_transfer(kind, src, node, dst, d.get("image") or "")
-        rec = {"name": name, "type": kind, "node": node or "本机", "src": src, "dst": dst,
+        rec = {"name": name, "type": kind, "node": node or "本地", "src": src, "dst": dst,
                "image": d.get("image") or "", "status": "成功" if res["ok"] else "失败",
                "log": res["log"][-3000:], "time": time.strftime("%Y-%m-%d %H:%M:%S")}
         rows = _col("sync")
@@ -3656,7 +3656,7 @@ def make_app():
 
     @app.get("/api/kvm")
     def api_kvm():
-        """KVM 虚拟机管理: 真实探测硬件虚拟化 / libvirt 连接, 并以真实 virsh 数据驱动
+        """KVM 虚拟机管理: 探测硬件虚拟化 / libvirt 连接, 并以真实 virsh 数据驱动
         虚拟机 / 存储池 / 网络 / 镜像 / 模板 五个子页。无 KVM 能力时返回 error,
         前端呈现与专业版一致的空态与风险提醒, 不伪造任何虚拟机数据。"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
@@ -3737,7 +3737,7 @@ def make_app():
 
     @app.post("/api/kvm/image")
     def api_kvm_image():
-        """镜像: 上传到默认镜像目录(真实写盘) / 删除。用于新建虚拟机时选择。"""
+        """镜像: 上传到默认镜像目录(写盘) / 删除。用于新建虚拟机时选择。"""
         if not _can_write(request.headers): return jsonify({"error": "forbidden"}), 403
         d = request.get_json(force=True, silent=True) or {}
         if d.get("op") == "rm":
@@ -3800,13 +3800,13 @@ def make_app():
 
     @app.get("/api/ha")
     def api_ha():
-        """应用高可用: 集群清单 + 节点真实探测 + 各类型已安装数据库实例。"""
+        """应用高可用: 集群清单 + 节点探测 + 各类型已安装数据库实例。"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
         return jsonify(_ha_payload())
 
     @app.post("/api/ha")
     def api_ha_op():
-        """添加 / 检测 / 删除 高可用集群。检测为真实 TCP 探测，结果如实回显。"""
+        """添加 / 检测 / 删除 高可用集群。检测为 TCP 探测，结果如实回显。"""
         if not _can_write(request.headers): return jsonify({"error": "forbidden"}), 403
         d = request.get_json(force=True, silent=True) or {}
         op = (d.get("op") or "add").strip()
@@ -3847,7 +3847,7 @@ def make_app():
 
     @app.get("/api/aigw")
     def api_aigw():
-        """AI 网关: 状态/账号池/模型组/API Key/用户组/用量统计, 全部来自真实落盘与真实用量记录。"""
+        """AI 网关: 状态/账号池/模型组/API Key/用户组/用量统计, 全部来自存储与真实用量记录。"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
         return jsonify(_aigw_payload())
 
@@ -4008,7 +4008,7 @@ def make_app():
             _op_log("ai-proxy", "edit", detail_zh="编辑用户组 [%s]" % name)
             return jsonify({"ok": True})
 
-        # ---- API Key (落盘 data/apikey.json, 与 APP 页共用) ----
+        # ---- API Key (存储 data/apikey.json, 与 APP 页共用) ----
         if op in ("key-add", "key-rm"):
             name = (d.get("name") or "").strip()
             if not name: return jsonify({"ok": False, "error": "名称不能为空"})
@@ -4111,7 +4111,7 @@ def make_app():
 
     @app.get("/api/wmon/stats")
     def api_wmon_stats():
-        """访问统计 / 趋势统计: 真实 nginx 访问日志聚合(热门路径/独立 IP/状态码分布/按小时与按天趋势)。"""
+        """访问统计 / 趋势统计:  nginx 访问日志聚合(热门路径/独立 IP/状态码分布/按小时与按天趋势)。"""
         if not need_auth(): return jsonify({"error":"unauth"}), 401
         from collections import Counter
         rows = _wmon_rows()
@@ -4571,7 +4571,7 @@ def make_app():
         _audit("info", "admin", "恢复界面设置默认", source="xsetting", operate="edit", detail_en="Reset UI settings")
         return jsonify({"ok": True, **json.loads(json.dumps(_UI_DEFAULT))})
 
-    # ---- 面板设置 (对标 1Panel 面板设置, 持久化 data/panel_settings.json) ----
+    # ---- 面板设置  ----
     PS_FILE = os.path.join(DATA, "panel_settings.json")
     SNAP_DIR = os.path.join(DATA, "snapshots")
     _PANEL_START = time.time()
@@ -4779,7 +4779,7 @@ def make_app():
 
     @app.post("/api/skills/install")
     def api_skill_install():
-        """两种入库方式: ① 上传 SKILL.md 内容 ② 从本机已有路径导入。均真实落盘。"""
+        """两种入库方式: ① 上传 SKILL.md 内容 ② 从本地已有路径导入。均存储。"""
         if not _can_write(request.headers): return jsonify({"ok": False, "error": "无写入权限"}), 403
         d = request.get_json(force=True, silent=True) or {}
         rows = _skills_rows()
@@ -5357,7 +5357,7 @@ def make_app():
 
     @app.post("/api/users/auth/sync")
     def api_users_auth_sync():
-        """真实 LDAP 同步：按 basedn+filter 拉取用户并落盘为本地账号。"""
+        """真实 LDAP 同步：按 basedn+filter 拉取用户并存储为本地账号。"""
         if not _can_write(request.headers): return jsonify({"error":"forbidden"}), 403
         d = auth_load(); srv = (d.get("server") or "").strip()
         if not srv: return jsonify({"ok": False, "error": "请先填写服务端地址"})
@@ -5428,7 +5428,7 @@ def make_app():
     def api_docker_mounts(cid):
         return jsonify(docker_mounts(cid))
 
-    # ---- 容器 > 更多 > 目录: 容器内文件浏览(对标 1Panel file 页) ----
+    # ---- 容器 > 更多 > 目录: 容器内文件浏览 ----
     @app.get("/api/docker/<cid>/files")
     def api_docker_files(cid):
         path = (request.args.get("path") or "/").strip() or "/"
@@ -6309,7 +6309,7 @@ def make_app():
     ACMESH = os.path.expanduser("~/.acme.sh/acme.sh")
     os.makedirs(CERTS_DIR, exist_ok=True)
 
-    # 证书附加信息(备注/自动续签/Acme账号) + Acme/DNS 账号库 + 自签证书, 均为面板本地持久化
+    # 证书附加信息(备注/自动续签/Acme账号) + Acme/DNS 账号库 + 自签证书, 均为面板本地持久
     CERT_META_FILE = DATA + "/cert_meta.json"
     CERT_ACCTS_FILE = DATA + "/cert_accts.json"
 
@@ -8041,7 +8041,7 @@ def make_app():
     @app.post("/api/toolbox/svc")
     def api_toolbox_svc():
         """启动/重启已安装的服务(supervisor/clamav/ftp/fail2ban), 真实 systemctl/service。
-        面板可能无 root 权限 → 返回真实探测结果, 不伪造成功。"""
+        面板可能无 root 权限 → 返回探测结果, 不伪造成功。"""
         import subprocess
         data = request.get_json(silent=True) or {}
         svc = (data.get("svc") or "").strip()
@@ -8075,7 +8075,7 @@ def make_app():
     @app.get("/api/toolbox/services")
     def api_toolbox_services():
         if not need_auth(): return jsonify({"error":"unauth"}), 401
-        """进程守护/病毒扫描/FTP/Fail2ban: 真实探测服务是否安装与运行。"""
+        """进程守护/病毒扫描/FTP/Fail2ban: 探测服务是否安装与运行。"""
         import subprocess, shutil
         def sh(c, timeout=6):
             try:
@@ -8091,7 +8091,7 @@ def make_app():
                 for b in bins:
                     if sh("pgrep -x " + b + " >/dev/null 2>&1 && echo y") == "y":
                         running = True; break
-            # 本机没有该服务端二进制时, 容器内同名进程不算本机服务(如实置 false)
+            # 本地没有该服务端二进制时, 容器内同名进程不算本地服务(如实置 false)
             svc[key] = {"present": bool(present), "running": bool(present and running)}
         probe("supervisor", ["supervisord", "supervisorctl"], ["supervisor", "supervisord"])
         probe("clamav", ["clamdscan", "clamscan", "clamd"], ["clamav-daemon", "clamav-freshclam"])
@@ -8114,7 +8114,7 @@ def make_app():
 
     @app.post("/api/toolbox/clean")
     def api_toolbox_clean():
-        """缓存清理：六个分类的真实扫描 + 真实删除。
+        """缓存清理：六个分类的扫描 + 真实删除。
         删除范围严格限定在白名单内的安全目标（轮转日志只删 *.gz/*.1/*.old），
         需要 root 的路径走免密 sudo；无权限时如实返回错误，不伪造成功。"""
         import os, glob, subprocess
@@ -8330,7 +8330,7 @@ def make_app():
             return 255, "", str(e)
 
     def _ssh_write_cfg(path, text):
-        """真实写入 sshd 配置文件（直写失败则 sudo -n tee）。返回 (ok, err)。"""
+        """写入 sshd 配置文件（直写失败则 sudo -n tee）。返回 (ok, err)。"""
         try:
             with open(path, "w") as f:
                 f.write(text)
@@ -8478,7 +8478,7 @@ def make_app():
             if k == "UseDNS": return "yes"
             return "-"
 
-        # 条件 Match 覆盖项（真实列出来，避免「设置里显示 yes、实际按来源是 no」的误导）
+        # 条件 Match 覆盖项（列出来，避免「设置里显示 yes、实际按来源是 no」的误导）
         cond_over = []
         for crit, kv in cfg["Cond"].items():
             for k, vs in kv.items():
@@ -8532,7 +8532,7 @@ def make_app():
             hostkeys.append({"file": os.path.basename(pub), "bits": pr[0],
                              "fp": pr[1] if len(pr) > 1 else "",
                              "type": (pr[3].strip("()") if len(pr) > 3 else "")})
-        # 授权密钥（真实读 ~/.ssh/ [authorized-keys]+ 逐条算指纹）
+        # 授权密钥（读 ~/.ssh/ [authorized-keys]+ 逐条算指纹）
         import tempfile as _tf
         ak = os.path.expanduser("~/.ssh/[authorized-keys]")
         authkeys = []
@@ -8580,7 +8580,7 @@ def make_app():
 
     @app.post("/api/ssh/service")
     def api_ssh_service():
-        """SSH 服务启停 / 开机自启：真实执行 systemctl(必要时 sudo -n)，回显真实返回码与 stderr。"""
+        """SSH 服务启停 / 开机自启：执行 systemctl(必要时 sudo -n)，回显真实返回码与 stderr。"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
         if not _can_write(request.headers):
             return jsonify({"ok": False, "error": "无写入权限"}), 403
@@ -8641,7 +8641,7 @@ def make_app():
 
     @app.post("/api/ssh/keys")
     def api_ssh_keys_write():
-        """授权密钥增删（真实写 ~/.ssh/[authorized-keys]）。{action:'add'|'del', key|raw}"""
+        """授权密钥增删（写 ~/.ssh/[authorized-keys]）。{action:'add'|'del', key|raw}"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
         if not _can_write(request.headers):
             return jsonify({"ok": False, "error": "无写入权限"}), 403
@@ -8813,7 +8813,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .main::-webkit-scrollbar-track{background:transparent}
  .main::-webkit-scrollbar-thumb{background:rgba(144,147,153,.3);border-radius:4px}
  .main::-webkit-scrollbar-thumb:hover{background:rgba(144,147,153,.5)}
- /* ===== 左侧栏 (浅色, 对标本机 demo) ===== */
+ /* ===== 左侧栏 (浅色, 
  .sidebar{width:var(--panel-menu-width);background:linear-gradient(var(--panel-menu-bg-color),var(--panel-menu-bg-color)) no-repeat top;background-color:var(--card);color:var(--text1);display:flex;flex-direction:column;
  position:fixed;top:0;bottom:0;left:0;z-index:100}
  .fixed{position:fixed;left:0;top:0;z-index:100;flex-shrink:0}
@@ -8841,7 +8841,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .nav a.act:before{content:"";background:var(--el-color-primary);border-radius:4px;width:4px;height:14px;position:absolute;left:12px}
  .nav a .ic{width:20px;height:20px;flex:none}
  .nav a .ic svg{width:20px;height:20px;fill:currentColor;display:block}
- /* 子菜单(对标 demo 1Panel 菜单) */
+ /* 子菜单 */
  .nav .m{position:relative;display:flex;align-items:center;gap:10px;height:42px;padding:0 14px;margin:7px 0;border-radius:4px;
   background:var(--el-menu-item-bg-color);box-shadow:0 0 4px #005eeb1a;
   color:var(--text1);font-size:14px;transition:border-color .3s,background-color .3s,color .3s;cursor:pointer;user-select:none;white-space:nowrap}
@@ -8861,7 +8861,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
   box-shadow:0px 0px 4px #005eeb1a}
  .nav .sub a.act:before{content:"";background:var(--el-color-primary);border-radius:4px;width:4px;height:14px;position:absolute;left:12px}
  .nav .sub.open{display:block}
- /* 底部主节点/用户栏 (对标 demo 1Panel 页脚) */
+ /* 底部主节点/用户栏  */
  .side-foot{flex-shrink:0;display:flex;flex-direction:column;background:none}
  .side-foot .node-selector{flex-shrink:0;display:flex;align-items:center;height:48px;padding:0;cursor:pointer;user-select:none;border-top:1px solid var(--panel-footer-border)}
  .side-foot .node-selector .ic{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin-left:17px}
@@ -8901,7 +8901,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .pane .head h2 small{color:var(--text3);font-weight:400;font-size:12px;margin-left:6px}
  .pane .head .acts{display:flex;align-items:center;gap:8px}
  .pane .body{padding:16px 20px}
- /* ===== 磁盘管理 (对标 1Panel v2.4.2 系统/磁盘管理) ===== */
+ /* ===== 磁盘管理  ===== */
  #disk .dk-title{font-size:16px;font-weight:500;color:var(--text1);line-height:22px}
  #disk .dk-list>.card{margin-bottom:12px}
  #disk .dk-list>.card:last-child{margin-bottom:0}
@@ -8922,7 +8922,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  #disk .dk-parts{margin:0}
  #disk .dk-parts td:first-child{color:var(--text1);font-weight:500}
  #disk .dk-empty{color:var(--text3);font-size:13px;padding:6px 0 0}
- /* ===== SSH 管理 (对标 1Panel v2.4.2 主机/SSH 管理) ===== */
+ /* ===== SSH 管理  ===== */
  #ssh .router_card{display:flex;align-items:center;height:44px;box-sizing:border-box;padding:0;margin-bottom:7px;border:1px solid #e4e7ed;border-radius:4px;background:var(--card);box-shadow:0 0 4px #005eeb1a;overflow:hidden}
  #ssh #ssh-p-sess>.ssh-card,#ssh #ssh-p-login>.ssh-card{margin-top:3px}
  #ssh .router_card>.el-radio-group{display:flex;align-items:center;gap:0;height:42px;margin:0;font-size:0}
@@ -8984,7 +8984,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  #ssh .el-tag{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;height:20px;padding:0 7px;border-radius:3px;font-size:12px;line-height:18px;border:1px solid transparent}
  #ssh .el-tag--success{background:#f0f9eb;border-color:#e1f3d8;color:#67c23a}
  #ssh .el-tag--danger{background:#fef0f0;border-color:#fde2e2;color:#f56c6c}
- /* ===== 防火墙 (对标 1Panel v2.4.2 主机/防火墙) ===== */
+ /* ===== 防火墙  ===== */
  #firewall .router_card{display:flex;align-items:center;height:44px;box-sizing:border-box;padding:0;margin-bottom:7px;border:1px solid #e4e7ed;border-radius:4px;background:var(--card);box-shadow:0 0 4px #005eeb1a;overflow:hidden}
  #firewall .router_card>.el-radio-group{display:flex;align-items:center;gap:0;height:42px;margin:0;font-size:0}
  /* 状态条 */
@@ -9071,7 +9071,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .tbl tbody tr:hover{background:var(--el-fill-color-light)}
  .tbl .mb8{color:var(--text3);font-size:12px}
  .sev{font-weight:600}.sev-ok{color:var(--success)}.sev-warn{color:var(--warning)}.sev-crit{color:var(--danger)}
- /* ===== 容器列表 (对标 1Panel /containers/container) ===== */
+ /* ===== 容器列表  ===== */
  .dtbl{table-layout:fixed}
  .tblscroll{width:100%;overflow:auto;scrollbar-width:none}
  .tblscroll::-webkit-scrollbar{width:0;height:0}
@@ -9124,7 +9124,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
   border:1px solid #b3e19d;border-radius:20px;background:#f0f9eb;color:#67c23a}
  .st-btn.off{border-color:#e9e9eb;background:#f4f4f5;color:#909399}
  .st-btn.warn{border-color:#f5dab1;background:#fdf6ec;color:#e6a23c}
- /* ===== 容器模块 (对标 1Panel v2.4.2 /containers/*) ===== */
+ /* ===== 容器模块  ===== */
  .ck-pane .card{margin-bottom:7px}
  .ck-pane .tblscroll{overflow-x:auto;overflow-y:auto;scrollbar-width:thin}
  /* 容器/列表卡片高度对齐 1Panel: 卡片高 = 100vh - 159px (900px 视口实测 741px), 表体内部滚动 */
@@ -9370,7 +9370,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .ov-quick .qk b{display:inline-flex;align-items:center;justify-content:center;height:38px;min-width:16px;padding:0 3px;
    border-radius:4px;background:var(--primary-1,#ecf5ff);color:var(--primary);font-size:20px;font-weight:600;line-height:1;box-sizing:border-box}
  .overview-quick-ico{display:block;margin:0 auto 10px;width:32px;height:32px;color:var(--primary)}
- /* ———— 安全入口 banner (对标本机 dashboard-entrance-alert) ———— */
+ /* ———— 安全入口 banner  ———— */
  .dashboard-entrance-alert{display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:6px;
    border:1px solid #e6a23c;background:#fdf6ec;color:#7c5a12;font-size:13px}
  .dashboard-entrance-alert .warn-ico{color:#e6a23c;font-weight:700}
@@ -9419,14 +9419,14 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .el-alert.warn{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:4px;background:rgba(230,162,60,.12);border:1px solid rgba(230,162,60,.35);color:#b88230;font-size:13px}
  .el-alert.warn b{color:#b88230;font-weight:600}
  .el-alert.info{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:4px;background:rgba(64,128,255,.10);border:1px solid rgba(64,128,255,.30);color:#3a6fb8;font-size:13px}
- /* ———— 状态 input-help 标签(对标本机 运行流畅 / (x/x)核 / x GB) ———— */
+ /* ———— 状态 input-help 标签核 / x GB) ———— */
  .ov-status .input-help{margin-top:2px;font-size:12px;color:var(--text3);line-height:17px;height:17px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:100%;text-align:center}
  .ov-status .st .text-center{width:100%;text-align:center;font-size:12px;line-height:19px;color:var(--text3)}
  .ov-grid #ov-status.custom-row{margin-bottom:33px;align-items:start;row-gap:0;margin-top:20px}
  .ov-grid .pane:has(#ov-status)+.home-card{margin-top:7px}
  .ov-grid #ov-status .st + .st{margin-top:0}
  .ov-grid .home-card+.home-card{margin-top:7px}
- /* ———— 状态卡片悬浮窗(对标本机 dashboard-status-popover + el-descriptions) ———— */
+ /* ———— 状态卡片悬浮窗 ———— */
  .ov-status .st{position:relative;cursor:help}
  .dashboard-status-popover{position:absolute;z-index:2010;display:none;background:#fff;border:1px solid var(--border2);border-radius:4px;
    top:calc(100% + 6px);left:50%;transform:translateX(-50%);
@@ -9442,7 +9442,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .dashboard-status-popover .el-button--small.is-link{margin:0;padding:0;background:none;border:none;color:var(--primary);font-size:13px;cursor:pointer;display:block}
  .dashboard-status-popover .cpu-detail{display:inline-block;background:rgba(64,158,255,.08);color:var(--primary);padding:2px 8px;border-radius:12px;font-size:12px;margin:2px 3px 2px 0}
  .dashboard-status-popover .mt-2{margin-top:8px}
- /* ———— 我的轮播 my-carousel(对标本机 el-carousel 系统信息/备忘录) ———— */
+ /* ———— 我的轮播 my-carousel ———— */
  .my-carousel{position:relative;height:381px;overflow:hidden}
  .my-carousel .slide{display:none}
  .my-carousel .slide.is-active{display:block}
@@ -9500,7 +9500,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .memo-word-limit{display:flex;align-items:center;justify-content:space-between;margin-top:6px;font-size:12px;color:var(--el-text-color-placeholder,#a8abb2)}
  .memo-editing-paused .caro-dots{opacity:1}
 
- /* ———— 网站列表页(对标 1Panel /websites 单卡片 + complex-table) ———— */
+ /* ———— 网站列表页 ———— */
  #sites{display:flex;flex-direction:column;height:100%;min-height:0;box-sizing:border-box}
  .sites-page{padding:20px!important;box-sizing:border-box;height:auto!important;flex:1 1 auto!important;min-height:0!important;max-height:calc(100vh - 61px)!important;overflow:hidden;display:flex;flex-direction:column}
  .sites-page>.head{display:none}
@@ -9774,7 +9774,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .el-table-st.card-mode td:first-child{display:none}
  .wf-drawer{display:flex;flex-direction:column}
  .wf-drawer .fp-drawer-bd{flex:1;overflow:auto}
- /* ———— 应用 launcher(对标本机 .dashboard-app .h-app-card) ———— */
+ /* ———— 应用 launcher ———— */
  .app-launcher .launcher{display:flex;flex-direction:column}
  .app-launcher .launcher .launcher-empty{padding:30px 0;text-align:center;color:var(--text3);font-size:13px}
  .h-app-card{display:flex;align-items:center;gap:10px;padding:8px 10px;margin-bottom:3px;border-radius:10px;
@@ -9805,7 +9805,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;vertical-align:middle}
  .empty{text-align:center;color:var(--text3);padding:26px;font-size:13px}
  .ok-icon,.warn-icon{font-weight:600}
- /* ===== 底部 footer (对标本机) ===== */
+ /* ===== 底部 footer  ===== */
  .panel-footer{background:var(--panel-footer-bg);border-top:1px solid var(--panel-footer-border);color:var(--text3);
   font-size:12px;padding:10px 20px;display:flex;align-items:center;gap:8px;margin:14px -20px -7px}
  .panel-footer a{color:var(--primary);margin:0 2px}
@@ -9832,7 +9832,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .footer-navigation-panel{margin-left:auto}
  .flex{display:flex} .flex-wrap{flex-wrap:wrap} .items-center{align-items:center} .ml-2{margin-left:8px} .font-normal{font-weight:400}
  /* ===== 悬浮终端按钮 ===== */
- /* ===== 登录页 (对标本机 demo: 左图右卡, 1Panel 登录) ===== */
+ /* ===== 登录页  ===== */
  .loginov{position:fixed;inset:0;z-index:900;background:var(--color-gray-100,#f4f4f4)}
  .login-bg{position:fixed;inset:0;background:#f2f3f5}
  .login-panel{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px}
@@ -9862,7 +9862,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .pager .pg.dis{opacity:.4;cursor:not-allowed}
  .pager .total{margin-right:8px;color:var(--text2)}
  .tbl .tname{color:var(--text1);font-weight:400}
- /* ===== 多机管理 (对标本机 node dashboard) ===== */
+ /* ===== 多机管理  ===== */
 
  .proc-page .router_card{padding:0;margin:0 0 10px;box-sizing:content-box;overflow:hidden;height:44px}
  .proc-page{height:calc(100vh - 67px);display:flex;flex-direction:column;box-sizing:border-box}
@@ -10411,7 +10411,7 @@ body.fp-watermark::after{content:attr(data-fp-wm);position:fixed;inset:0;pointer
  background-image:repeating-linear-gradient(-30deg,transparent 0 120px,transparent 120px 240px);opacity:0;display:none}
 body.fp-watermark .content::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;opacity:.06;
  background-image:repeating-linear-gradient(-30deg,var(--text1) 0 1px,transparent 1px 160px)}
-/* ===== 面板设置 #cfg 表单样式 (对标 1Panel el-form) ===== */
+/* ===== 面板设置 #cfg 表单样式  ===== */
 #cfg .cfg-form{padding:4px 0}
 #cfg .el-form-item{display:flex;margin-bottom:18px;align-items:flex-start}
 #cfg .el-form-item__label{flex:none;width:150px;text-align:right;padding-right:12px;font-size:14px;line-height:32px;color:var(--text2);height:32px;box-sizing:border-box}
@@ -10429,7 +10429,7 @@ body.fp-watermark .content::after{content:'';position:fixed;inset:0;pointer-even
 #cfg .cfg-colorbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:4px;cursor:pointer;font-size:14px;color:var(--text1);background:var(--card)}
 #cfg .cfg-colorbtn input[type=color]{width:18px;height:18px;border:none;background:none;padding:0;cursor:pointer}
 #cfg .pane{margin-bottom:12px}
-/* ===== 界面设置 #uiset (对标 1Panel el-form) ===== */
+/* ===== 界面设置 #uiset  ===== */
 #uiset>.router_card{display:flex;align-items:center;height:44px;box-sizing:border-box;padding:0;margin-bottom:7px;border:1px solid #e4e7ed;border-radius:4px;background:var(--card);box-shadow:0 0 4px #005eeb1a;overflow:hidden}
 #uiset>.router_card .el-card__body{display:flex;align-items:center;width:100%;padding:0}
 #uiset .uiset-form{padding:12px 24px 8px;color:var(--text2);font-size:14px}
@@ -11139,7 +11139,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
        <div class="content-container__title">
         <div class="ck-left"><a class="btn" onclick="ckCreate()">创建</a><a class="btn ghost" onclick="ckImport()">导入</a><a class="btn ghost" onclick="ckPrune('containers')">清理容器</a></div>
         <div class="ck-right">
-         <select class="sel" id=ck-node style="height:30px;margin-right:8px" onchange="CK_NODE=this.value;dload()" title="选择节点"><option value="">本机 (home-4c31g)</option></select>
+         <select class="sel" id=ck-node style="height:30px;margin-right:8px" onchange="CK_NODE=this.value;dload()" title="选择节点"><option value="">本地 (home-4c31g)</option></select>
          <div class="el-radio-group">
           <label class="el-radio-button el-radio-button--default el-tooltip__trigger" title="卡片视图"><input class="el-radio-button__original-radio" type="radio"><span class="el-radio-button__inner"><svg class="vi" viewBox="0 0 1024 1024"><path fill="currentColor" d="M640 384v256H384V384h256zm64 0h192v256H704V384zm-64 512H384V704h256v192zm64 0V704h192v192H704zm-64-768v192H384V128h256zm64 0h192v192H704V128zM320 384v256H128V384h192zm0 512H128V704h192v192zm0-768v192H128V128h192z"/></svg></span></label>
           <label class="el-radio-button is-active el-radio-button--default el-tooltip__trigger" title="表格视图"><input class="el-radio-button__original-radio" type="radio" checked><span class="el-radio-button__inner"><svg class="vi" viewBox="0 0 1024 1024"><path fill="currentColor" d="M704 192h160v736H160V192h160v64h384v-64zM288 512h448v-64H288v64zm0 256h448v-64H288v64zm96-576V96h256v96H384z"/></svg></span></label>
@@ -11291,7 +11291,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
           <label class="el-radio-button is-active el-radio-button--default" title="列表模式" onclick="sitesMode('table',this)"><input class="el-radio-button__original-radio" type="radio" value="table"><span class="el-radio-button__inner"><i class="el-icon"><svg class="svg-icon"><use xlink:href="#p-list"></use></svg></i></span></label>
          </div>
          <div class="el-select el-select--default p-w-200"><div class="el-select__wrapper"><div class="el-select__prefix">类型</div><select id=sf-type class="el-select__native" onchange="sload()"><option value="">请选择</option><option>反向代理</option><option>静态</option><option>应用</option></select><div class="el-select__suffix"><i class="el-icon el-select__caret el-select__icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="M831.872 340.864 512 652.672 192.128 340.864a30.59 30.59 0 0 0-42.752 0 29.12 29.12 0 0 0 0 41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.728 30.59 30.59 0 0 0-42.752 0z"></path></svg></i></div></div></div>
-         <select class="sel" id=s-node style="height:30px;margin-right:8px" onchange="SITE_NODE=this.value;sload()" title="选择节点"><option value="">本机 (home-4c31g)</option></select>
+         <select class="sel" id=s-node style="height:30px;margin-right:8px" onchange="SITE_NODE=this.value;sload()" title="选择节点"><option value="">本地 (home-4c31g)</option></select>
          <div class="el-select el-select--default p-w-200"><div class="el-select__wrapper"><div class="el-select__prefix">分组</div><select id=sf-group class="el-select__native" onchange="sload()"><option>所有</option></select><div class="el-select__suffix"><i class="el-icon el-select__caret el-select__icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="M831.872 340.864 512 652.672 192.128 340.864a30.59 30.59 0 0 0-42.752 0 29.12 29.12 0 0 0 0 41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.728 30.59 30.59 0 0 0-42.752 0z"></path></svg></i></div></div></div>
          <div style="width:200px;height:32px"><div class="search-button"><div class="el-input el-input--default el-input--suffix"><div class="el-input__wrapper"><input id=sf-name class="el-input__inner" type="text" placeholder="搜索" oninput="sload()"><span class="el-input__suffix"><span class="el-input__suffix-inner"><i class="el-icon el-input__icon el-input__clear" style="visibility:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="m466.752 512-90.496-90.496a32 32 0 0 1 45.248-45.248L512 466.752l90.496-90.496a32 32 0 1 1 45.248 45.248L557.248 512l90.496 90.496a32 32 0 1 1-45.248 45.248L512 557.248l-90.496 90.496a32 32 0 0 1-45.248-45.248z"></path><path fill="currentColor" d="M512 896a384 384 0 1 0 0-768 384 384 0 0 0 0 768m0 64a448 448 0 1 1 0-896 448 448 0 0 1 0 896"></path></svg></i><i class="el-icon el-input__icon"><svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="m795.904 750.72 124.992 124.928a32 32 0 0 1-45.248 45.248L750.656 795.904a416 416 0 1 1 45.248-45.248zM480 832a352 352 0 1 0 0-704 352 352 0 0 0 0 704z"></path></svg></i></span></span></div></div></div></div>
          <button type="button" class="el-button el-button--default fresh-button" onclick="sload()"><i class="el-icon"><svg class="svg-icon"><use xlink:href="#p-refresh"></use></svg></i></button>
@@ -11318,7 +11318,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
      </div>
     </div>
    </div>
-   <!-- ===== 网站 创建表单(对标本机 /websites/create 抽屉) ===== -->
+   <!-- ===== 网站 创建表单 ===== -->
    <div class="fp-mask" id=wf-mask style="display:none" onclick="wfClose()"></div>
    <div class="fp-drawer wf-drawer" id=wf-drawer style="display:none">
     <div class="fp-drawer-hd">
@@ -11609,7 +11609,7 @@ Filesystem      Size  Used Avail Use% Mounted on
      <div class="body">
       <div class="row" style="margin-bottom:14px">
        <input id="csearch" class="ipt" placeholder="搜索域名/备注" style="width:220px" oninput="cload()">
-       <select class="sel" id="c-node" style="height:30px" onchange="CERT_NODE=this.value;cload()" title="选择节点"><option value="">本机 (home-4c31g)</option></select>
+       <select class="sel" id="c-node" style="height:30px" onchange="CERT_NODE=this.value;cload()" title="选择节点"><option value="">本地 (home-4c31g)</option></select>
        <a class="btn ghost" onclick="document.getElementById('csearch').value='';cload()">重置</a>
       </div>
       <table class="tbl"><thead><tr>
@@ -11884,7 +11884,7 @@ Filesystem      Size  Used Avail Use% Mounted on
      </div>
     </div>
    </div>
-   <!-- ===== 模型 (对标本机「AI-模型」) ===== -->
+   <!-- ===== 模型  ===== -->
    <div id="models" class="view" style="display:none">
     <div class="router_card el-card"><div class="el-card__body"><div class="flex w-full flex-col justify-start sm:items-center items-start sm:justify-between sm:flex-row"><div class="el-radio-group" role="radiogroup">
       <label class="el-radio-button is-active el-radio-button--large router_card_button"><input class="el-radio-button__original-radio" type="radio" value="模型账号" checked onclick="mkTab('模型账号')"><span class="el-radio-button__inner">模型账号</span></label>
@@ -12836,7 +12836,7 @@ function toolAct(name){
   });
  }
 }
-/* ---------- 缓存清理：真实扫描 + 真实删除 ---------- */
+/* ---------- 缓存清理：扫描 + 真实删除 ---------- */
 function toolClean(){
  const box=document.getElementById('clean-tb');if(!box)return;
  box.innerHTML='<div style="padding:12px 2px;color:var(--text3)">扫描中…</div>';
@@ -12893,7 +12893,7 @@ function toolboxSvc(t){
    +'ℹ️ 面板对服务做真实 systemctl / pgrep 探测；启动/重启会返回真实结果（无权限时如实报错）。</div>';
  }).catch(()=>{e.innerHTML='<div style="padding:16px;color:var(--text3)">服务状态读取失败</div>';});
 }
-function toolSvcStart(k){fpConfirm('确定在本机启动 '+k+' 服务吗？','启动服务','确定启动').then(ok=>{if(!ok)return;
+function toolSvcStart(k){fpConfirm('确定在本地启动 '+k+' 服务吗？','启动服务','确定启动').then(ok=>{if(!ok)return;
  fetch('/api/toolbox/svc',{method:'POST',headers:{'Content-Type':'application/json','X-Fleet-Token':TOK},body:JSON.stringify({svc:k,act:'start'})})
   .then(r=>r.json()).then(d=>{fpToast(tbEsc(d.msg||d.error||('已尝试启动 '+k)),d.ok?'success':'error');toolboxSvc(TB.tab);});});}
 function toolSvcRestart(k){
@@ -13756,7 +13756,7 @@ function skillsUpload(){
 function skillsImport(){
  const body='<div class="fp-form" style="padding:16px">'+
   '<div class="fp-msg-label">导入方式</div>'+
-  '<select class="fp-msg-in" id="sk-mode"><option value="path">从本机 SKILL.md 路径导入</option><option value="json">粘贴 JSON 清单</option></select>'+
+  '<select class="fp-msg-in" id="sk-mode"><option value="path">从本地 SKILL.md 路径导入</option><option value="json">粘贴 JSON 清单</option></select>'+
   '<div class="fp-msg-label" style="margin-top:12px">路径 / JSON</div><textarea class="fp-msg-in" id="sk-src" rows="8" placeholder="/home/yy/xxx/SKILL.md 或 [{"name":"a"}]"></textarea>'+
   '<div style="margin-top:16px;text-align:right"><button class="elb" onclick="fpClose()">取消</button><button class="elb primary" id="ski-ok">确认</button></div></div>';
  fpDrawer('Skills Hub','导入 Skill',body);
@@ -14580,7 +14580,7 @@ function svcLoad(){
  }).catch(()=>{const tb=document.getElementById('svc-tb');if(tb)tb.innerHTML='<tr><td colspan="5" class="empty">暂无数据</td></tr>';});
 }
 
-/* ---------- 主机日志（对标 host-system）：journald 游标分页 + 时间范围/优先级/服务 + 追踪抽屉 ---------- */
+/* ---------- 主机日志（
 var HL_PRI=[['0','紧急 Emergency'],['1','警报 Alert'],['2','严重 Critical'],['3','错误 Error'],['4','警告 Warning'],['5','通知 Notice'],['6','信息 Info'],['7','调试 Debug']];
 HL_SYSCACHE={};
 HL_PAGES.host={root:'#hl-panel',built:false};
@@ -14865,7 +14865,7 @@ function lgExport(){
 }
 window.lgExport=lgExport;
 window.lgRefresh=lgRefresh;window.lgTimer=lgTimer;window.lgTimerMenu=lgTimerMenu;window.lgKw=lgKw;window.lgSearch=lgSearch;window.lgSel=lgSel;window.lgPgSize=lgPgSize;window.lgPg=lgPg;window.lgClear=lgClear;window.lgTip=lgTip;window.lgTipHide=lgTipHide;
-/* ---------- 日志审计（对标 1Panel：log-CNiGfbeL 顶部 router-button + operation/ssh 表格 + website 日志组件） ---------- */
+/* ---------- 日志审计（
 var LG_STATE={operation:{res:'',status:'',node:'',kw:'',page:1,size:20,timer:0,total:0,items:[]},
               access:{status:'',kw:'',page:1,size:20,timer:0,total:0,items:[]},
               sys:{svc:'',pri:'',status:'',kw:'',page:1,size:20,timer:0,total:0,items:[]},
@@ -15083,7 +15083,7 @@ function lgClear(t){
 function lgConfirmClear(t){
  return window.confirm('此操作将删除全部「'+(LG_SUBNAME[t]||'日志')+'」，是否继续？');
 }
-/* ---------- 网站日志（对标 website-DCpIN3DB：运行日志/错误日志 + 网站下拉 + 追踪 + 下载 + 清空日志） ---------- */
+/* ---------- 网站日志（
 function lgWsInit(){
  if(LG_WS.sites.length){lgWsFill();lgWsLoad();return;}
  fetch('/api/sites').then(r=>r.json()).then(d=>{
@@ -15179,7 +15179,7 @@ function renderMemo(){
  const c=document.getElementById('ov-caro');if(c)c.classList.toggle('memo-editing-paused',memoEditing);
 }
 function escHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-/* 对标 1Panel MarkDownEditor(md-editor-v3 MdPreview + DOMPurify)：本地实现的 Markdown → HTML 渲染 */
+/* 
 function memoMd(src){
  if(!src)return '';
  const esc=escHtml;
@@ -15284,7 +15284,7 @@ function caro(i){const c=document.getElementById('ov-caro');if(!c)return;
  c.querySelectorAll('.slide').forEach(s=>s.classList.toggle('is-active',+s.dataset.s===i));
  c.querySelectorAll('.caro-dot').forEach((d,j)=>d.classList.toggle('is-active',j===i));
  window._caroIdx=i;}
-/* 自动切换(对标 el-carousel autoplay 默认 3000ms，编辑备忘录时暂停，鼠标悬停暂停) */
+/* 自动切换 */
 var caroHover=false,caroTimer=null;
 function caroCount(){return memoCarouselVisible?2:1;}
 function caroTick(){if(memoEditing||caroHover)return;const n=caroCount();if(n<=1)return;caro(((window._caroIdx||0)+1)%n);}
@@ -15387,7 +15387,7 @@ async function ovload(){
  // 快速跳转
  document.getElementById('q-agent').textContent=d.quicks.agent;document.getElementById('q-site').textContent=d.quicks.site;
  document.getElementById('q-db').textContent=d.quicks.db;document.getElementById('q-app').textContent=d.quicks.app;
- // 状态(对标本机「运行流畅 / (x/y) 核 / 内存 / 磁盘」4 卡片 + dashboard-status-popover 悬浮窗)
+ // 状态 核 / 内存 / 磁盘」4 卡片 + dashboard-status-popover 悬浮窗)
  const ld=d.load[0]||0,lb=(ld<2?'运行流畅':ld<4?'负载偏高':'负载过高');
  const lc=(lb==='运行流畅'?'#67c23a':lb==='负载偏高'?'#e6a23c':'#f56c6c');
  const pp=[ld/Math.max(1,d.cores)*100, ld/Math.max(1,d.cores)*100, d.mem.used/d.mem.total*100, d.disk.pct];
@@ -15477,7 +15477,7 @@ async function ovload(){
   </div>
   <div class="mobile-monitor-chart"><div id="networkChart"></div></div>`;
  document.getElementById('mnic').innerHTML='<option>所有</option>'+(d.nics||[]).map(n=>`<option>${n}</option>`).join('');
- // 折线图(对标本机 monitor-chart 上/下行双轴)
+ // 折线图
  if(window.echarts){
   const out=(!!window._ovdl&&window._ovdl.out);
   const selNic=window._mnic||'所有';
@@ -15506,7 +15506,7 @@ async function ovload(){
  }
  // 系统信息
  window._ovData=d;renderSysInfo(d);
- // 应用(对标本机 dashboard-app .h-app-card —— 已安装/可选应用 launcher)
+ // 应用
  const apps=d.apps||[];
  const inst=apps.map(a=>`
   <div class="h-app-card">
@@ -15544,10 +15544,10 @@ async function load(){(await fetch('/api/hosts')).json().catch(()=>{});
 function sum_(ok,warn,crit,off){
  const k=[['正常主机',ok,'#67c23a'],['警告',warn,'#e6a23c'],['异常',crit,'#f56c6c'],['失联',off,'#909399']];
  return k.map(([l,n,c])=>`<div class="kpi" style="--kp:${c}"><div class="n" style="color:${c}">${n}</div><div class="l">${l}</div></div>`).join('');}
-/* ===== 容器模块 (对标 1Panel /containers/*) ===== */
+/* ===== 容器模块  ===== */
 const CK_TABS=['dashboard','container','compose','image','network','volume','repo','template','setting'];
 let _ckTimer=null,_ckFilter='all';
-let CK_NODE='';   // 节点选择器: 空 = 本机; 非空 = hosts 表节点名(走 /api/hosts/<n>/docker)
+let CK_NODE='';   // 节点选择器: 空 = 本地; 非空 = hosts 表节点名(走 /api/hosts/<n>/docker)
 let SITE_NODE=''; // 站点页节点选择器: 非空 = 远端只读展示 /api/hosts/<n>/nginx
 let CERT_NODE=''; // 证书页节点选择器: 非空 = 远端只读展示 /api/hosts/<n>/certs
 let _ckNodesLoaded=false;
@@ -15971,12 +15971,12 @@ function ckDockerSvc(op){
  const msg=op=='stop'?'停止 Docker 服务将停止所有正在运行的容器，是否继续？':'重启 Docker 服务将短暂中断容器网络，是否继续？';
  if(!confirm(msg))return;
  _ckPost('/api/docker/service',{op:op}).then(r=>{toast(r&&r.ok?('Docker 服务已'+({stop:'停止',restart:'重启'})[op]):'操作失败: '+((r&&r.error)||''));});}
-/* 状态图标 (对标 p-start / p-stop) */
+/* 状态图标  */
 const _SICON_START='<svg class="si" viewBox="0 0 1024 1024"><path fill="currentColor" d="M512 64a448 448 0 1 1 0 896 448 448 0 0 1 0-896zm0 64a384 384 0 1 0 0 768 384 384 0 0 0 0-768zm-32 192a32 32 0 0 1 64 0v256a32 32 0 0 1-64 0V320zm32 384a40 40 0 1 1 0 80 40 40 0 0 1 0-80z"/></svg>';
 const _SICON_STOP='<svg class="si" viewBox="0 0 1024 1024"><path fill="currentColor" d="M512 64a448 448 0 1 1 0 896 448 448 0 0 1 0-896zm0 64a384 384 0 1 0 0 768 384 384 0 0 0 0-768zm-96 256h192a32 32 0 0 1 32 32v192a32 32 0 0 1-32 32H416a32 32 0 0 1-32-32V416a32 32 0 0 1 32-32z"/></svg>';
 const _TAGICON='<svg class="ti" viewBox="0 0 1024 1024"><path fill="currentColor" d="m249.6 417.088 319.744 43.072 39.168 310.272L845.12 178.88 249.6 417.088zm-129.024 47.168a32 32 0 0 1-7.68-61.44l777.792-311.04a32 32 0 0 1 41.6 41.6l-310.336 775.68a32 32 0 0 1-61.44-7.808L512 516.992l-391.424-52.736z"/></svg>';
 function dfmt(c){
- // 运行时长: 真实面板显示 "Up 3 weeks" / "Exited (137) 3 days ago"
+ // 运行时长: 面板显示 "Up 3 weeks" / "Exited (137) 3 days ago"
  if(c.state=='running') return 'Up '+String(c.running||'').replace(/\s*ago$/,'');
  return c.status||c.running||'-';}
 function ckMenu(e,el){e.stopPropagation();
@@ -17818,7 +17818,7 @@ if(window.matchMedia){
  try{window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{if(localStorage.getItem('fleet-theme')==='auto')_applyTheme('auto');});}catch(e){}
 }
 
-/* ===== 面板设置 (对标 1Panel) ===== */
+/* ===== 面板设置  ===== */
 const CFG_PANES={'面板':'cfg-panel-body','安全':'cfg-sec-body','告警通知':'cfg-alert-body','备份账号':'cfg-backup-body',
  '快照':'cfg-snap-body','许可证':'cfg-lic-body','API Key':'cfg-key-body','关于':'cfg-about-body'};
 let CFG_STATE=null;
@@ -18287,7 +18287,7 @@ function certDetailDrawer(domain){
 async function dact(cid,op){if(!confirm(op+' '+cid))return;const u=CK_NODE?('/api/hosts/'+encodeURIComponent(CK_NODE)+'/docker/'+cid+'/'+op):('/api/docker/'+cid+'/'+op);await fetch(u,{method:'POST',headers:{'X-Fleet-Token':TOK}});dload();}
 async function dlogs(cid,name){const u=CK_NODE?('/api/hosts/'+encodeURIComponent(CK_NODE)+'/docker/'+cid+'/logs'):('/api/docker/'+cid+'/logs');const r=await fetch(u);const d=await r.json();
  prompt(name+' 日志(尾部):',(d.out||d.error||'').slice(-1800));}
-// ---- 多机管理 (node dashboard, 对标本机挂载) ----
+// ---- 多机管理 (node dashboard, 
 const NODES={tab:'overview',cur:'主节点',hosts:[],dbtype:''};
 function ndTab(v){
  NODES.tab=v;
@@ -18315,7 +18315,7 @@ async function ndload(){
  const rows=hosts.filter(h=>!kw||(h.name||'').toLowerCase().includes(kw)||(h.ip||'').includes(kw)).map(h=>{
    const ok=h.sev=='ok',st=ok?'正常':h.sev==='warn'?'警告':'异常';
    const sevcls=h.sev?h.sev:'ok';
-   // 每台节点的核数/内存总量都不一样, 这里只展示该节点自己的绝对量, 不套本机数据
+   // 每台节点的核数/内存总量都不一样, 这里只展示该节点自己的绝对量, 不套本地数据
    const cpu=h.load1==null?'-':Number(h.load1).toFixed(2);
    return `<tr>
     <td><b>${h.name}</b> <span class="mb8">${h.inet||''}</span></td>
@@ -18445,7 +18445,7 @@ async function ndPanelsLoad(){
 function ndPanelSync(){fpConfirm('确认将当前面板配置同步到所有节点？','同步面板配置','同步').then(ok=>{
  if(ok)fpToast('面板配置已同步到 1 个节点');});}
 function nodesload(){ndload();}
-// ---- 智能体 (agent dashboard, 对标本机 1Panel「智能体」) ----
+// ---- 智能体 (agent dashboard, 
 function agentload(){
  const q=(document.getElementById('ag-search')?document.getElementById('ag-search').value:'').trim();
  const rows=window._agents||[];
@@ -18472,7 +18472,7 @@ function nodesinit(){nodesload();}
 async function agLogs(name){const out=await runTerm(name==='this'?'':name,'tail -n 60 /tmp/fleet-panel.log 2>/dev/null || journalctl -n 60 --no-pager 2>/dev/null');prompt((name||'-')+' 日志(尾部)',out);}
 // ---- 专业版视图: 内联表单 + 集合后端 (models/mcp/tpl/env/app/sync/agents/ha) ----
 function field(label, id, ph){return `<div style="display:flex;align-items:center;gap:8px;margin:6px 0"><span style="min-width:92px;color:var(--text2);font-size:13px">${label}</span><input id=${id} class="ipt" style="flex:1;max-width:320px" placeholder="${ph||''}"></div>`;}
-// ---- 多机管理行操作: 终端 / 日志 / 重启(本机走 term,sudo fallback; 远端返回待接) ----
+// ---- 多机管理行操作: 终端 / 日志 / 重启(本地走 term,sudo fallback; 远端返回待接) ----
 async function runTerm(host,cmd){const r=await fetch('/api/term',{method:'POST',headers:{'Content-Type':'application/json','X-Fleet-Token':TOK},body:JSON.stringify({host:host||'this',cmd})});const d=await r.json();
  return d.done?((d.rc+'\n'+d.out).slice(0,1800)):('(通道不可用) '+(d.msg||''));}
 function hTerm(host){show('term');termInit();termOpenNode(host||'');}
@@ -19067,8 +19067,8 @@ function syCreateWith(pre){
   termF('名称',1,termIpt('sy-f-name','',v('name')))+
   termF('目标节点',1,`<div class="el-input"><div class="el-input__wrapper"><select class="el-input__inner" id="sy-f-node">${nodeOpts}</select></div></div>`)+
   termF(SY_TAB==='镜像对传'?'镜像':'源路径',1,termIpt('sy-f-src',SY_TAB==='镜像对传'?'nginx:alpine':'/home/yy/fleet-panel',v('src')))+
-  termF('目标路径',1,termIpt('sy-f-dst','/srv/sync','/srv/sync'),SY_TAB==='镜像对传'?'镜像对传无需目标路径':'本机直接复制;远端走 rsync/scp(需在 终端>主机 中配置该节点)')+
-  termF('',0,'<div style="font-size:12px;color:var(--text3)">执行后真实落盘到同步记录，可在右侧列表查看日志。</div>');
+  termF('目标路径',1,termIpt('sy-f-dst','/srv/sync','/srv/sync'),SY_TAB==='镜像对传'?'镜像对传无需目标路径':'本地直接复制;远端走 rsync/scp(需在 终端>主机 中配置该节点)')+
+  termF('',0,'<div style="font-size:12px;color:var(--text3)">执行后存储到同步记录，可在右侧列表查看日志。</div>');
  termDrawer('创建 · '+SY_TAB,body,
   `<span class="dialog-footer"><button type="button" class="el-button el-button--default" onclick="termDrawerClose()"><span>取消</span></button>
    <button type="button" class="el-button el-button--primary" onclick="sySubmit()"><span>确认</span></button></span>`);
@@ -19092,7 +19092,7 @@ async function sySubmit(){
  syLog(p.name);
 }
 function syOpenForm(){syCreate();}
-// ---- 专业版静态视图: WAF 概览(真实 nginx 计数) / 防篡改(真实站点保护) / GPU(真实探测) / models-本地模型 ----
+// ---- 专业版静态视图: WAF 概览( nginx 计数) / 防篡改(真实站点保护) / GPU(探测) / models-本地模型 ----
 function wafload(){wafT();fetch('/api/waf').then(r=>r.json()).then(d=>{
  const s=document.getElementById('waf-req');if(s)s.textContent=d.req||0;
  const b=document.querySelectorAll('#waf .nd-stat');if(b.length>=4){const gi=document.querySelectorAll('#waf .nd-stat .nd-num');if(gi[1])gi[1].textContent=(d.block||0);if(gi[2])gi[2].textContent=(d.n4||0);if(gi[3])gi[3].textContent=(d.n5||0);}
@@ -19303,8 +19303,8 @@ function fwRender(){
   if(!rules.length){
    empty.textContent=FW_TAB==='主机防火墙'
      ?(FW_DATA.status.enabled?'暂无数据':'当前未开启系统防火墙，请先开启！')
-     :(FW_TAB==='容器端口防护'?'暂无容器端口映射：本机没有带 -p 发布端口的运行中容器'
-       :'暂无端口转发规则：本机未安装 iptables 或 nat 表 PREROUTING 链中没有 DNAT 规则');
+     :(FW_TAB==='容器端口防护'?'暂无容器端口映射：本地没有带 -p 发布端口的运行中容器'
+       :'暂无端口转发规则：本地未安装 iptables 或 nat 表 PREROUTING 链中没有 DNAT 规则');
   }
  }
  var pn=document.getElementById('fw-pg-num');if(pn)pn.textContent=FW_PAGE;
@@ -19414,7 +19414,7 @@ function fwEdit(i){
   termF('动作',1,termIpt('fwe-act','允许 / 拒绝',raw.act||'允许'))+
   termF('协议',1,termIpt('fwe-proto','TCP / UDP',raw.proto||'TCP'))+
   termF('端口',1,termIpt('fwe-port','',raw.port||''))+
-  termF('说明',1,'<div class="term-drawer-tip">该规则优先来自系统实际监听端口(ss -tulnp)。仅当本机存在 iptables 且面板以 root 运行时才能回写 INPUT 链。</div>'),
+  termF('说明',1,'<div class="term-drawer-tip">该规则优先来自系统实际监听端口(ss -tulnp)。仅当本地存在 iptables 且面板以 root 运行时才能回写 INPUT 链。</div>'),
   '<span class="dialog-footer"><button type="button" class="el-button el-button--default" onclick="termDrawerClose()"><span>取消</span></button><button type="button" class="el-button el-button--primary" onclick="fwEditSubmit('+i+')"><span>确认</span></button></span>');
 }
 function fwEditSubmit(i){
@@ -19517,7 +19517,7 @@ function fwRenderSettings(){
   '<div class="el-form-item"><label class="el-form-item__label">默认出站策略</label><div class="el-form-item__content">'+sel('fws-out',s.outbound,['允许','拒绝'])+'</div></div>'+
   '<div class="el-form-item"><label class="el-form-item__label">日志级别</label><div class="el-form-item__content">'+sel('fws-log',s.log,['off','low','medium','high'])+'</div></div>'+
   '<div class="el-form-item"><label class="el-form-item__label">IPv4 转发</label><div class="el-form-item__content">'+
-   '<label class="el-switch"><input type="checkbox" id="fws-fwd"'+(s.forward?' checked':'')+'> 开启后允许本机转发端口流量</label></div></div>'+
+   '<label class="el-switch"><input type="checkbox" id="fws-fwd"'+(s.forward?' checked':'')+'> 开启后允许本地转发端口流量</label></div></div>'+
   '<div style="margin-top:16px;display:flex;gap:8px">'+
    '<button type="button" class="el-button el-button--primary" onclick="fwSaveSettings()"><span>保存</span></button>'+
    '<button type="button" class="el-button el-button--default" onclick="fwload(true)"><span>刷新</span></button>'+
@@ -20007,7 +20007,7 @@ function gpuHistLoad(force){
   var pg=document.getElementById('gpu-hist-pager');
   if(pg)pg.innerHTML='<span class="ph">共 '+(j.total||0)+' 条</span><span class="ph"><b>20</b>条/页</span><span class="ph">1</span><span class="ph">前往 <b>1</b> 页</span>';
   if(!li.length){
-   tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--text3);height:80px">暂无历史记录：本机未检测到支持的 GPU/XPU/NPU，实时探测有数据后会自动采样</td></tr>';return;
+   tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--text3);height:80px">暂无历史记录：本地未检测到支持的 GPU/XPU/NPU，实时探测有数据后会自动采样</td></tr>';return;
   }
   tb.innerHTML=li.map(function(g){
    return '<tr><td>'+esc(g.time||'-')+'</td><td><b>'+esc(g.name||'-')+'</b></td><td>'+esc(g.temp||'-')+'°C</td><td>'+esc(g.util||'-')+'%</td><td>'+esc(g.mem||'-')+'</td><td>'+esc(g.bus||'-')+'</td></tr>';
@@ -20366,7 +20366,7 @@ function wmonSites(pane){
    wmonTbl(['域名','类型','站点状态','监控状态','操作'],rows,'暂无网站');
  }).catch(()=>{});
 }
-// ---- 界面设置: 真实读写 ui.json, 主色/背景实时应用到 :root ----
+// ---- 界面设置: 读写 ui.json, 主色/背景实时应用到 :root ----
 var _uisetData={};
 var _uisetLocal={};
 var _uisetDirtyFlag=false;
