@@ -10840,7 +10840,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
 /* fleet 覆盖:1Panel memo-content 规则在其后生效 */
 </style></head><body>
 <div id="loginov" class="loginov"><div class="login-bg"></div><div class="login-panel"><div class="lp-login">
-<div class="lp-left"><img src="/static/img/1panel-login.jpg" alt="1panel"></div>
+<div class="lp-left"></div>
 <div class="lp-right"><div class="lp-form"><div class="lp-head"><div class="lp-tit">登录</div>
 <label class="lp-lang"><span>中文(简体)</span><svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M831.872 340.864 512 652.672 192.128 340.864a30.592 30.592 0 0 0-42.752 0 29.12 29.12 0 0 0 0 41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.728 30.592 30.592 0 0 0-42.752 0z"></path></svg></label></div>
 <input id="lp-user" class="ipt" placeholder="用户名" autocomplete="username" style="width:100%">
@@ -20406,7 +20406,7 @@ function uisetApplyBrand(d){
 }
 function uisetApplyLogin(d){
  const img=document.querySelector('#loginov .lp-left img');
- if(img)img.src=d.loginimg||'/static/img/1panel-login.jpg';
+ if(img)img.src=d.loginimg||'';
  const bg=document.querySelector('#loginov .login-bg');
  if(bg){
   if((d.bgtype||'图片')==='背景色'){bg.style.backgroundImage='none';bg.style.background=d.bgcolor||'#005eeb';}
