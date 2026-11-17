@@ -10463,6 +10463,15 @@ html[data-fleet-theme="dark"] #hl-panel .el-alert--info.is-light,html[data-fleet
 #hl-panel .hl-dlg__row,#audit #lg-host .hl-dlg__row{display:flex;align-items:center;gap:12px;margin-bottom:16px}
 #hl-panel .hl-dlg__row>label,#audit #lg-host .hl-dlg__row>label{width:60px;text-align:right;color:#606266;font-size:14px;flex:none}
 #hl-panel .hl-dlg__foot,#audit #lg-host .hl-dlg__foot{display:flex;justify-content:flex-end;gap:10px;padding:8px 20px 18px}
+/* AI 修复记录查看模态（自包含, 不依赖 #hl-panel/#lg-host scoped 规则） */
+#aifix-dlg{position:fixed;inset:0;z-index:3000;display:flex;align-items:flex-start;justify-content:center;padding-top:8vh}
+#aifix-dlg .aifix-mask{position:absolute;inset:0;background:#0006}
+#aifix-dlg .aifix-box{position:relative;width:min(860px,92vw);max-height:84vh;background:#fff;border-radius:6px;box-shadow:0 12px 32px #0005;display:flex;flex-direction:column;overflow:hidden}
+#aifix-dlg .aifix-head{display:flex;align-items:center;justify-content:space-between;padding:14px 20px 10px;font-size:15px;color:#303133;border-bottom:1px solid #e4e7ed;flex:none}
+#aifix-dlg .aifix-x{cursor:pointer;color:#909399;font-size:20px;line-height:1;padding:4px}
+#aifix-dlg .aifix-x:hover{color:#303133}
+#aifix-dlg .aifix-body{padding:14px 20px 20px;overflow:auto;color:var(--text1,#303133)}
+#aifix-dlg .aifix-meta{margin-bottom:8px;font-size:12px;color:#909399}
 #hl-panel .p-w-200,#audit #lg-host .p-w-200{width:200px}
 #hl-panel .el-select__wrapper,#audit #lg-host .el-select__wrapper{display:flex;align-items:center;height:32px;box-sizing:border-box;padding:0 11px;border-radius:4px;box-shadow:0 0 0 1px #dcdfe6 inset;background:#fff;position:relative}
 #hl-panel .el-select__prefix.placeholder,#audit #lg-host .el-select__prefix.placeholder{flex:0 0 auto;color:#a8abb2;font-size:14px;white-space:nowrap}
@@ -11277,10 +11286,20 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
      <div class="head"><h2>修复记录</h2>
       <div class="acts"><button class="btn ghost" onclick="aiFixLoad()">刷新</button></div></div>
      <div class="body">
+      <div class="metric-grid" id="ai-fix-stats" style="margin-bottom:14px"></div>
       <table class="tbl"><thead><tr><th>ID</th><th>节点</th><th>CLI</th><th>模式</th><th>状态</th><th>开始</th><th>操作</th></tr></thead>
        <tbody id=ai-fix-tb></tbody></table>
      </div>
     </div>
+    </div>
+   </div>
+   <!-- AI 修复报告查看模态（自包含, 独立于 pane 之外） -->
+   <div id="aifix-dlg" style="display:none">
+    <div class="aifix-mask" onclick="aiFixDlg(false)"></div>
+    <div class="aifix-box">
+     <div class="aifix-head"><span id="aifix-title"></span><span class="aifix-x" onclick="aiFixDlg(false)">×</span></div>
+     <div class="aifix-meta" id="aifix-meta"></div>
+     <div class="aifix-body"><div class="md-editor md-editor-previewOnly"><div class="md-editor-preview" id="aifix-md"></div></div></div>
     </div>
    </div>
    <div id="nodes" class="view" style="display:none">
@@ -18418,22 +18437,43 @@ async function aiNodeClear(h){
 }
 async function aiFixLoad(){
  const tb=document.getElementById('ai-fix-tb');if(!tb)return;
- let d={};try{d=await (await fetch('/api/ai/fixes?limit=20')).json();}catch(e){}
+ let d={};try{d=await (await fetch('/api/ai/fixes?limit=200')).json();}catch(e){}
  const rows=d.list||[];
  tb.innerHTML=rows.length?rows.map(r=>{
   const t=r.started_at?new Date(r.started_at*1000).toLocaleString():'-';
   const st=r.status==='done'?'<span class="sev sev-ok">完成</span>':r.status==='failed'?'<span class="sev sev-crit">失败</span>':'<span class="sev sev-warn">运行中</span>';
   return `<tr><td>${r.id}</td><td>${r.host||'-'}</td><td>${r.cli||'-'}</td><td>${r.mode||'-'}</td><td>${st}</td><td class="mb8">${t}</td>
    <td><a class="btn link" onclick="aiFixView(${r.id})">查看</a></td></tr>`;}).join(''):'<tr><td colspan=7 class="empty">暂无记录</td></tr>';
+ aiFixStats(rows);
+ AI_FIX_CACHE=rows;
+}
+function aiFixStats(rows){
+ const el=document.getElementById('ai-fix-stats');if(!el)return;
+ const done=rows.filter(r=>r.status==='done').length;
+ const failed=rows.filter(r=>r.status==='failed').length;
+ const run=rows.filter(r=>r.status!=='done'&&r.status!=='failed').length;
+ const total=rows.length;
+ const rate=(done+failed)?Math.round(done/(done+failed)*100)+'%':'—';
+ // 失败节点 / CLI 分布
+ const fc={};const cc={};
+ rows.filter(r=>r.status==='failed').forEach(r=>{fc[r.host||'?']=(fc[r.host||'?']||0)+1;cc[r.cli||'?']=(cc[r.cli||'?']||0)+1;});
+ const top=(m,n)=>Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,n).map(([k,v])=>k+'×'+v).join(' ')||'—';
+ const card=(label,val,color)=>{const c=color||'var(--text,#303133)';return `<div class="metric-card" style="flex:1 1 150px;min-height:76px"><div class="metric-label">${label}</div><div class="metric-value" style="font-size:20px;color:${c}">${val}</div></div>`;};
+ el.innerHTML=card('总次数',total)+card('成功',done,'#19be6b')+card('失败',failed,'#f56c6c')+card('成功率',rate)+card('运行中',run)+card('失败节点',top(fc))+'<div class="metric-card" style="flex:1 1 150px;min-height:76px"><div class="metric-label">CLI 分布</div><div class="metric-value" style="font-size:14px;font-weight:500;color:var(--text,#303133)">'+top(cc)+'</div></div>';
 }
 let AI_FIX_CACHE=[];
+function aiFixDlg(showIt){const el=document.getElementById('aifix-dlg');if(!el)return;el.style.display=showIt?'flex':'none';}
 async function aiFixView(id){
- if(!AI_FIX_CACHE.length){try{const d=await (await fetch('/api/ai/fixes?limit=50')).json();AI_FIX_CACHE=d.list||[];}catch(e){}}
+ if(!AI_FIX_CACHE.length){try{const d=await (await fetch('/api/ai/fixes?limit=200')).json();AI_FIX_CACHE=d.list||[];}catch(e){}}
  const r=AI_FIX_CACHE.find(x=>x.id===id);
  if(!r)return fpToast('记录已过期，请刷新','error');
  const t=r.started_at?new Date(r.started_at*1000).toLocaleString():'-';
  const t2=r.done_at?new Date(r.done_at*1000).toLocaleString():'-';
- prompt(`${r.host} · ${r.cli} · ${r.mode} · ${r.status}\n开始 ${t}  结束 ${t2}\n\n异常: ${r.reason||''}`,r.output||'(无输出)');
+ const stLabel=r.status==='done'?'完成':(r.status==='failed'?'失败':'运行中');
+ document.getElementById('aifix-title').textContent=`#${r.id} ${r.host||'-'} · ${r.cli||'-'} · ${r.mode||'-'} · ${stLabel}`;
+ document.getElementById('aifix-meta').textContent=`开始 ${t}   结束 ${t2}   异常: ${r.reason||'(无)'}`;
+ document.getElementById('aifix-md').innerHTML=memoMd(r.output||'(无输出)');
+ aiFixDlg(true);
 }
 /* ===== 证书 ===== */
 const CERTS={rows:[],view:[],sel:new Set(),kw:''};
