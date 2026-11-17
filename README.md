@@ -1,4 +1,4 @@
-# fleet-panel 自研自愈闭环（对标 1Panel 专业版多机能力，开源自建）
+# fleet-panel 自研自愈闭环
 
 server : flask app  <- 各机 agent 上报 / 面板查询 / 指令下发，SQLite 落盘
 agent  : 每台托管机常驻，自检 load/mem/disk/docker + 轮询自愈指令
