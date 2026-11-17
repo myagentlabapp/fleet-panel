@@ -4929,7 +4929,12 @@ def make_app():
         for k in ("enabled", "mode", "cooldown_sec", "default_cli", "timeout"):
             if k in d: cur[k] = d[k]
         for k in ("hosts", "custom_clis"):
-            if isinstance(d.get(k), dict): cur[k].update(d[k])
+            if isinstance(d.get(k), dict):
+                for hk, hv in d[k].items():
+                    if hv is None:          # null = 删除该节点的覆盖配置
+                        cur[k].pop(hk, None)
+                    else:
+                        cur[k][hk] = hv
         _ai_save(cur)
         _audit("info", "admin", "更新 AI 自愈配置", source="ai", operate="edit",
                detail_en="Update AI self-heal config")
@@ -11227,6 +11232,16 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
     </div>
    </div>
    <div id="agentstore" class="view" style="display:none">
+    <div class="card pane router_card">
+     <div class="body node-rt">
+      <div class="el-radio-group" role="radiogroup" id=ag-tabs>
+       <label class="el-radio-button is-active el-radio-button--large router_card_button" onclick="agTab('instances')"><input class="el-radio-button__original-radio" type="radio" value="实例"><span class="el-radio-button__inner">实例</span></label>
+       <label class="el-radio-button el-radio-button--large router_card_button" onclick="agTab('nodes')"><input class="el-radio-button__original-radio" type="radio" value="节点 Agent"><span class="el-radio-button__inner">节点 Agent</span></label>
+       <label class="el-radio-button el-radio-button--large router_card_button" onclick="agTab('fixes')"><input class="el-radio-button__original-radio" type="radio" value="修复记录"><span class="el-radio-button__inner">修复记录</span></label>
+      </div>
+     </div>
+    </div>
+    <div id="ag-pane-instances">
     <div class="card pane">
      <div class="head"><h2>智能体</h2>
       <div class="acts"><input id=ag-search class="ipt" placeholder="搜索" style="width:180px" oninput="agentload()"><a class="btn" onclick="agOpenForm()">创建</a><a class="btn ghost" onclick="agRefresh()">批量操作</a></div></div>
@@ -11237,6 +11252,35 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
       </tr></thead><tbody id=agent-tb></tbody></table>
       <div class="pager"><span class="ph">暂无数据</span><span class="ph">共 0 条</span><span class="ph"><b>20</b>条/页</span><span class="ph">1</span><span class="ph">前往 <b>1</b> 页</span></div>
      </div>
+    </div>
+    </div>
+    <div id="ag-pane-nodes" style="display:none">
+    <div class="card pane">
+     <div class="head"><h2>节点 Agent<small>异常时自动派发给该节点自带的 AI CLI</small></h2>
+      <div class="acts"><button class="btn ghost" onclick="aiProbeAll()">探测全部</button><button class="btn ghost" onclick="aiNodeLoad()">刷新</button></div></div>
+     <div class="body">
+      <div class="row" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-size:13px;color:var(--text2)">
+       <label style="display:flex;align-items:center;gap:6px"><input type=checkbox id=aien> 启用自动派发（crit 异常时）</label>
+       <span>模式</span><select id=aimode class="sel" style="width:180px"><option value="report">report（只诊断）</option><option value="fix">fix（允许修复）</option></select>
+       <span>冷却(秒)</span><input id=aicd class="ipt" style="width:90px">
+       <span>默认 CLI</span><input id=aicli class="ipt" style="width:110px" placeholder="claude">
+       <button class="btn" onclick="aiCfgSave()">保存全局设置</button>
+      </div>
+      <table class="tbl"><thead><tr><th>节点</th><th>已装 CLI（实测）</th><th>使用 CLI</th><th>工作目录</th><th>超时(s)</th><th>操作</th></tr></thead>
+       <tbody id=ai-node-tb></tbody></table>
+      <div class="pager"><span class="ph" id=ai-node-total>共 0 条</span></div>
+     </div>
+    </div>
+    </div>
+    <div id="ag-pane-fixes" style="display:none">
+    <div class="card pane">
+     <div class="head"><h2>修复记录</h2>
+      <div class="acts"><button class="btn ghost" onclick="aiFixLoad()">刷新</button></div></div>
+     <div class="body">
+      <table class="tbl"><thead><tr><th>ID</th><th>节点</th><th>CLI</th><th>模式</th><th>状态</th><th>开始</th><th>操作</th></tr></thead>
+       <tbody id=ai-fix-tb></tbody></table>
+     </div>
+    </div>
     </div>
    </div>
    <div id="nodes" class="view" style="display:none">
@@ -12056,45 +12100,6 @@ Filesystem      Size  Used Avail Use% Mounted on
        <div class="el-form-item">
         <div class="el-form-item__label"></div>
         <div class="el-form-item__content"><button class="btn ghost" onclick="atest()">发送测试通知</button></div>
-       </div>
-      </div>
-     </div>
-     <div class="card pane" style="margin-top:14px">
-      <div class="head"><h2>AI 自愈<small>异常自动派发给节点自带的 agent</small></h2>
-       <div class="acts"><button class="btn ghost" onclick="aiCfgLoad()">刷新</button><button class="btn" onclick="aiCfgSave()">保存</button></div></div>
-      <div class="body cfg-form">
-       <div class="el-form-item">
-        <div class="el-form-item__label">总开关</div>
-        <div class="el-form-item__content">
-         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2)"><input type=checkbox id=aien> 启用（crit 异常时自动派发）</label>
-        </div>
-       </div>
-       <div class="el-form-item">
-        <div class="el-form-item__label">模式</div>
-        <div class="el-form-item__content">
-         <select id=aimode class="sel" style="width:200px">
-          <option value="report">report（只诊断，不改动）</option>
-          <option value="fix">fix（允许执行修复）</option>
-         </select>
-         <span style="margin-left:12px;color:var(--text2);font-size:13px">冷却(秒)</span>
-         <input id=aicd class="ipt" style="width:90px">
-         <span style="margin-left:12px;color:var(--text2);font-size:13px">默认 CLI</span>
-         <input id=aicli class="ipt" style="width:110px" placeholder="claude">
-        </div>
-       </div>
-       <div class="el-form-item">
-        <div class="el-form-item__label">节点 CLI 实测</div>
-        <div class="el-form-item__content">
-         <button class="btn ghost" onclick="aiProbe()">探测全部节点已装的 CLI</button>
-         <div id=ai-probe-out style="margin-top:8px;font-size:13px;color:var(--text2);white-space:pre-wrap"></div>
-        </div>
-       </div>
-       <div class="el-form-item">
-        <div class="el-form-item__label">修复记录</div>
-        <div class="el-form-item__content" style="flex:1">
-         <table class="tbl"><thead><tr><th>ID</th><th>节点</th><th>CLI</th><th>模式</th><th>状态</th><th>开始</th><th>操作</th></tr></thead>
-          <tbody id=ai-fix-tb></tbody></table>
-        </div>
        </div>
       </div>
      </div>
@@ -12995,7 +13000,7 @@ function show(v){
  if(v==='store')storeTab('全部'); if(v==='nodes')nodesload(); if(v==='docker'){const act=document.querySelector('#ck-tabs .router_card_button.is-active');
   const i=[...document.querySelectorAll('#ck-tabs .router_card_button')].indexOf(act);
   ckTab(CK_TABS[i<0?1:i]);}
- if(v==='term'){termInit();} if(v==='certs')cload(); if(v==='agentstore')agentload(); if(v==='db')dbTabSet('mysql'); if(v==='files')fload(curDir||'/home/yy'); if(v==='proc')pload(); if(v==='disk')dikload(); if(v==='ssh')sshload(); if(v==='firewall')fwload(); if(v==='audit')auditload(); if(v==='toolbox')toolboxload(); if(v==='mon')monload(); if(v==='hostlog')hostlogTab(HL_TAB); if(v==='overview')ovload(); if(v==='models'||v==='mcp'||v==='tpl'||v==='env'||v==='sync')colLoad(v); if(v==='waf')wafload(); if(v==='tamper')tamperload(); if(v==='gpu')gpuload(); if(v==='kvm')kvmload(); if(v==='ha')haload(); if(v==='wmon')wmonload(); if(v==='uiset')uisetload(); if(v==='aigw')aigwTab(document.querySelector('#aigw .el-radio-button.is-active .el-radio-button__inner').textContent.trim()); if(v==='skills')skillsload(); if(v==='bench')benchload(); if(v==='users')usersload(); if(v==='report')reportload(); if(v==='app')appLoad(); if(v==='cfg'){cfgLoad();cfgTab('面板');}}
+ if(v==='term'){termInit();} if(v==='certs')cload(); if(v==='agentstore')agTab(AG_CUR); if(v==='db')dbTabSet('mysql'); if(v==='files')fload(curDir||'/home/yy'); if(v==='proc')pload(); if(v==='disk')dikload(); if(v==='ssh')sshload(); if(v==='firewall')fwload(); if(v==='audit')auditload(); if(v==='toolbox')toolboxload(); if(v==='mon')monload(); if(v==='hostlog')hostlogTab(HL_TAB); if(v==='overview')ovload(); if(v==='models'||v==='mcp'||v==='tpl'||v==='env'||v==='sync')colLoad(v); if(v==='waf')wafload(); if(v==='tamper')tamperload(); if(v==='gpu')gpuload(); if(v==='kvm')kvmload(); if(v==='ha')haload(); if(v==='wmon')wmonload(); if(v==='uiset')uisetload(); if(v==='aigw')aigwTab(document.querySelector('#aigw .el-radio-button.is-active .el-radio-button__inner').textContent.trim()); if(v==='skills')skillsload(); if(v==='bench')benchload(); if(v==='users')usersload(); if(v==='report')reportload(); if(v==='app')appLoad(); if(v==='cfg'){cfgLoad();cfgTab('面板');}}
 var TB={tab:'快速设置',ui:null,cats:null,busy:false};
 function tbEsc(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function tbPost(key,value){
@@ -18104,7 +18109,7 @@ function cfgTab(t){
  else if(t==='快照')cfgSnapLoad();
  else if(t==='API Key')cfgKeyLoad();
  else if(t==='关于')cfgAboutLoad();
- else if(t==='告警通知'){aload();aiCfgLoad();}
+ else if(t==='告警通知')aload();
 }
 function cfgApplyRadio(gid,val){
  const g=document.getElementById(gid);if(!g)return;
@@ -18313,6 +18318,22 @@ async function asave(){const a={thresholds:{load1:+document.getElementById('al')
  const r=await fetch('/api/alert',{method:'POST',headers:{'Content-Type':'application/json','X-Fleet-Token':TOK},body:JSON.stringify(a)});
  const d=await r.json();fpToast(d.ok?'告警设置已保存':('ERR '+(d.error||'')),d.ok?'success':'error');}
 async function atest(){const r=await fetch('/api/notify/test',{method:'POST',headers:{'X-Fleet-Token':TOK}});const d=await r.json().catch(()=>({}));fpToast(d.ok?'已触发测试通知':'测试通知失败',d.ok?'success':'error');}
+/* ===== 智能体页 tab 切换 ===== */
+const AG_TAB='instances';
+let AG_CUR='instances';
+function agTab(v){
+ AG_CUR=v||'instances';
+ document.querySelectorAll('#ag-tabs .el-radio-button').forEach(l=>{
+  const inp=l.querySelector('input'); const val=inp?inp.value:'';
+  l.classList.toggle('is-active',val===(v==='instances'?'实例':v==='nodes'?'节点 Agent':'修复记录'));
+ });
+ ['instances','nodes','fixes'].forEach(k=>{
+  const el=document.getElementById('ag-pane-'+k); if(el)el.style.display=(k===v?'':'none');
+ });
+ if(v==='instances'){agentloadBack();}
+ else if(v==='nodes'){aiNodeLoad();}
+ else if(v==='fixes'){aiFixLoad();}
+}
 /* ===== AI 自愈配置 / 探测 / 记录 ===== */
 async function aiCfgLoad(){
  let d={};try{d=await (await fetch('/api/ai/config')).json();}catch(e){}
@@ -18321,7 +18342,7 @@ async function aiCfgLoad(){
  const md=document.getElementById('aimode');if(md)md.value=c.mode||'report';
  const cd=document.getElementById('aicd');if(cd)cd.value=c.cooldown_sec||1800;
  const cl=document.getElementById('aicli');if(cl)cl.value=c.default_cli||'claude';
- aiFixLoad();
+ return c;
 }
 async function aiCfgSave(){
  const body={enabled:document.getElementById('aien').checked,
@@ -18331,16 +18352,69 @@ async function aiCfgSave(){
  const r=await fetch('/api/ai/config',{method:'POST',headers:chdr(),body:JSON.stringify(body)});
  const d=await r.json().catch(()=>({}));
  fpToast(d.ok?'AI 自愈配置已保存':('ERR '+(d.error||'')),d.ok?'success':'error');
+ if(d.ok)aiNodeLoad();
 }
-async function aiProbe(){
- const out=document.getElementById('ai-probe-out');if(out)out.textContent='探测中…（逐台 SSH，可能需要一会儿）';
- let d={};try{d=await (await fetch('/api/ai/agents')).json();}catch(e){}
- const hs=d.hosts||{};const lines=[];
- Object.keys(hs).sort().forEach(k=>{
-  const v=hs[k]||{};
-  lines.push(k+' : '+(v.ok?((v.found||[]).join(', ')||'(未装任何 agent CLI)'):('不可达 '+(v.error||''))));
- });
- if(out)out.textContent=lines.join('\n')||'(无节点)';
+/* 节点 × CLI 资产表 */
+const AI_NODE={hosts:[],cfg:{},probe:{}};
+async function aiNodeLoad(){
+ const tb=document.getElementById('ai-node-tb');if(!tb)return;
+ tb.innerHTML='<tr><td colspan=6 class="empty">读取中…</td></tr>';
+ const c=await aiCfgLoad();
+ AI_NODE.cfg=c||{};
+ let hs=[];try{hs=await (await fetch('/api/hosts')).json();}catch(e){hs=[];}
+ const names=(hs||[]).map(h=>h.name).filter(Boolean);
+ Object.keys(AI_NODE.cfg.hosts||{}).forEach(k=>{if(!names.includes(k))names.push(k);});
+ names.sort();
+ AI_NODE.hosts=names;
+ const hc=AI_NODE.cfg.hosts||{};
+ const defCli=AI_NODE.cfg.default_cli||'claude';
+ tb.innerHTML=names.length?names.map(h=>{
+  const cfg=hc[h]||{};
+  const cli=cfg.cli||defCli;
+  const wd=cfg.workdir||'/home/yy';
+  const to=cfg.timeout||AI_NODE.cfg.timeout||300;
+  const pb=AI_NODE.probe[h];
+  const probed=pb?(pb.ok?((pb.found||[]).join(', ')||'<span class="mb8">（未装任何 agent CLI）</span>'):('<span class="sev sev-crit">不可达</span>')):'<span class="mb8">未探测</span>';
+  return `<tr>
+   <td><b>${h}</b></td>
+   <td class="mb8">${probed}</td>
+   <td><input class="ipt" id="ain-cli-${h}" style="width:110px" value="${cli}"></td>
+   <td><input class="ipt" id="ain-wd-${h}" style="width:150px" value="${wd}"></td>
+   <td><input class="ipt" id="ain-to-${h}" style="width:80px" value="${to}"></td>
+   <td><a class="btn link" onclick="aiNodeProbe('${h}')">探测</a> <a class="btn link" onclick="aiNodeSave('${h}')">保存</a> <a class="btn link" onclick="aiNodeClear('${h}')">清除</a></td>
+  </tr>`;}).join(''):'<tr><td colspan=6 class="empty">暂无节点</td></tr>';
+ const tot=document.getElementById('ai-node-total');if(tot)tot.textContent='共 '+names.length+' 条';
+}
+async function aiNodeProbe(h){
+ const btn=event&&event.target;if(btn)btn.textContent='探测中…';
+ try{const d=await (await fetch('/api/ai/agents?host='+encodeURIComponent(h))).json();
+  AI_NODE.probe[h]={ok:!!d.ok,found:d.found||[],error:d.error||''};
+ }catch(e){AI_NODE.probe[h]={ok:false,found:[],error:String(e)};}
+ await aiNodeLoad();
+}
+async function aiProbeAll(){
+ fpToast('正在逐台探测节点 CLI…');
+ try{const d=await (await fetch('/api/ai/agents')).json();
+  const hs=d.hosts||{};
+  Object.keys(hs).forEach(k=>{const v=hs[k]||{};AI_NODE.probe[k]={ok:!!v.ok,found:v.found||[],error:v.error||''};});
+  fpToast('探测完成','success');
+ }catch(e){fpToast('探测失败：'+e,'error');}
+ await aiNodeLoad();
+}
+async function aiNodeSave(h){
+ const g=id=>{const e=document.getElementById(id);return e?e.value.trim():'';};
+ const body={hosts:{}};
+ body.hosts[h]={cli:g('ain-cli-'+h)||'claude',workdir:g('ain-wd-'+h)||'/home/yy',timeout:+g('ain-to-'+h)||300};
+ const r=await fetch('/api/ai/config',{method:'POST',headers:chdr(),body:JSON.stringify(body)});
+ const d=await r.json().catch(()=>({}));
+ fpToast(d.ok?('已保存 '+h+' 的配置'):('ERR '+(d.error||'')),d.ok?'success':'error');
+}
+async function aiNodeClear(h){
+ if(!confirm('清除 '+h+' 的单节点配置，回落到全局默认？'))return;
+ const r=await fetch('/api/ai/config',{method:'POST',headers:chdr(),body:JSON.stringify({hosts:{[h]:null}})});
+ const d=await r.json().catch(()=>({}));
+ fpToast(d.ok?('已清除 '+h+' 的配置'):('ERR '+(d.error||'')),d.ok?'success':'error');
+ if(d.ok)aiNodeLoad();
 }
 async function aiFixLoad(){
  const tb=document.getElementById('ai-fix-tb');if(!tb)return;
@@ -18775,7 +18849,7 @@ function agentload(){
  const tb=rows.filter(a=>!q||(a.name||'').includes(q)||(a.model||'').includes(q));
  const html=document.getElementById('agent-tb');
  if(!html)return;
- const pager=document.querySelector('#agentstore .pager');
+ const pager=document.querySelector('#ag-pane-instances .pager');
  const ph=pager?pager.querySelectorAll('.ph'):[];
  if(!tb.length){html.innerHTML=`<tr><td colspan=12 class="empty">暂无数据</td></tr>`;
   if(ph.length>=2){ph[0].textContent='暂无数据';ph[1].textContent='共 0 条';}return;}
