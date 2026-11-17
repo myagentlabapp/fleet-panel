@@ -878,14 +878,14 @@ def _node_login(host):
     return addr, rec
 
 
-def term_run(host, cmd, sudo=False):
+def term_run(host, cmd, sudo=False, timeout=60):
     # 本地
     if host in ("", "this", "home-4c31g", socket.gethostname()):
         full = cmd
         if sudo:
             full = "sudo " + cmd
         try:
-            r = _sp.run(["bash", "-lc", full], capture_output=True, text=True, timeout=60)
+            r = _sp.run(["bash", "-lc", full], capture_output=True, text=True, timeout=timeout)
             return {"ok": True, "done": True, "rc": r.returncode,
                     "out": (r.stdout + r.stderr)[-4000:]}
         except Exception as e:
@@ -896,7 +896,7 @@ def term_run(host, cmd, sudo=False):
         return {"ok": True, "done": False, "msg": f"未找到节点 {host} 的地址(先在节点管理里纳管)"}
     full = ("sudo -n " + cmd) if sudo else cmd
     if rec and rec.get("auth") == "password" and rec.get("password"):
-        r = ssh_exec(rec, full, timeout=60, pwd=rec["password"])
+        r = ssh_exec(rec, full, timeout=timeout, pwd=rec["password"])
     else:
         args = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR"]
@@ -904,7 +904,7 @@ def term_run(host, cmd, sudo=False):
             args += ["-i", NODE_KEY, "-o", "IdentitiesOnly=yes"]
         try:
             p = _sp.run(args + [f"{NODE_USER}@{addr}", full],
-                        capture_output=True, text=True, timeout=60)
+                        capture_output=True, text=True, timeout=timeout)
             r = {"ok": True, "rc": p.returncode, "out": (p.stdout + p.stderr)[-4000:]}
         except _sp.TimeoutExpired:
             r = {"ok": False, "rc": -1, "out": "执行超时"}
@@ -2824,6 +2824,9 @@ def db():
             status TEXT, issued_at INTEGER, done_at INTEGER, result TEXT)""")
         c.execute("""CREATE TABLE IF NOT EXISTS events(
             id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, host TEXT, level TEXT, msg TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS ai_fixes(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT, reason TEXT, cli TEXT,
+            mode TEXT, status TEXT, started_at INTEGER, done_at INTEGER, output TEXT)""")
         _conn.c = c
     return _conn.c
 
@@ -2887,10 +2890,182 @@ def report(host, ip, inet, metrics):
         if not dk: parts.append(f"disk={disk}%")
         if not wk: parts.append(f"latency={lat}ms")
         notify_ex(sev, host, "alert: " + ", ".join(parts))
+    # crit 异常 -> 可选自动派发给节点自带的 AI agent 诊断/修复
+    if sev == "crit":
+        _auto_dispatch(host, "crit: " + ", ".join(p for p in (
+            "" if lk else f"load={load1}", "" if mk else f"mem={mem}%",
+            "" if dk else f"disk={disk}%", "" if wk else f"latency={lat}ms") if p))
     # 静默 —— 快速恢复,避免重复轰炸
     c.execute("DELETE FROM events WHERE at < ?", (int(time.time())-86400,))
     c.commit()
     return {"ok": True, "sev": sev, "alerts": alerts}
+
+# ---------- AI 自愈: 异常 -> 派发给节点自带 agent CLI -> 报告回传 ----------
+# 不依赖 agent.py(它没部署到任何节点)。复用面板到各节点的 SSH 免密通道(term_run),
+# 在目标节点上直接跑该节点自己的 claude/codex/opencode, 零部署即可全机队生效。
+AI_CFG_FILE = os.path.join(DATA, "agents_ai.json")
+AI_PROBES = ["claude", "codex", "opencode", "gemini", "qwen", "aider"]
+_AI_STATE = {}          # host -> 上次派发时间戳(cooldown 去重)
+_AI_LOCK = threading.Lock()
+
+_AI_DEFAULT = {
+    "enabled": False,          # 默认关闭: AI 自动动服务器属不可逆操作, 需显式开启
+    "mode": "report",          # report=只诊断输出报告 ; fix=允许执行修复动作
+    "cooldown_sec": 1800,      # 同一节点两次自动派发的最小间隔
+    "default_cli": "claude",
+    "timeout": 300,
+    "hosts": {},               # {"节点名": {"cli": "claude", "workdir": "/home/yy", "timeout": 300}}
+    "custom_clis": {           # 非交互调用模板, {prompt} 会被替换
+        "claude": "claude -p {prompt} --permission-mode bypassPermissions",
+        "codex": "codex exec {prompt}",
+        "opencode": "opencode run {prompt}",
+    },
+}
+
+
+def _ai_cfg():
+    if not os.path.exists(AI_CFG_FILE):
+        _ai_save(dict(_AI_DEFAULT))
+        return json.loads(json.dumps(_AI_DEFAULT))
+    try:
+        d = json.load(open(AI_CFG_FILE, encoding="utf-8"))
+    except Exception:
+        d = {}
+    if not isinstance(d, dict): d = {}
+    out = json.loads(json.dumps(_AI_DEFAULT))
+    out.update({k: v for k, v in d.items() if v is not None})
+    for k in ("hosts", "custom_clis"):
+        if not isinstance(out.get(k), dict):
+            out[k] = dict(_AI_DEFAULT[k])
+        else:
+            merged = dict(_AI_DEFAULT[k]); merged.update(out[k]); out[k] = merged
+    return out
+
+
+def _ai_save(cfg):
+    os.makedirs(DATA, exist_ok=True)
+    tmp = AI_CFG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, AI_CFG_FILE)
+
+
+def ai_host_conf(cfg, host):
+    """取某节点的 CLI 配置, 缺省回落全局 default_cli。"""
+    h = dict(cfg.get("hosts", {}).get(host) or {})
+    h.setdefault("cli", cfg.get("default_cli") or "claude")
+    h.setdefault("workdir", "/home/yy")
+    h.setdefault("timeout", cfg.get("timeout") or 300)
+    return h
+
+
+def probe_agents(host):
+    """实测该节点装了哪些 agent CLI(不猜)。本地节点走 term_run 的本地分支。"""
+    cmd = "; ".join(f"command -v {c} >/dev/null 2>&1 && echo {c}" for c in AI_PROBES)
+    r = term_run(host, cmd)
+    if not r.get("done"):
+        return {"ok": False, "error": r.get("msg") or "SSH 通道不可达", "found": []}
+    found = [ln.strip() for ln in str(r.get("out", "")).splitlines()
+             if ln.strip() in AI_PROBES]
+    return {"ok": True, "found": sorted(set(found))}
+
+
+def _recent_events(host, n=8):
+    try:
+        rows = db().execute("SELECT at,level,msg FROM events WHERE host=? ORDER BY at DESC LIMIT ?",
+                            (host, n)).fetchall()
+    except Exception:
+        return []
+    return [f"{time.strftime('%H:%M', time.localtime(t))} [{lv}] {m}" for t, lv, m in rows]
+
+
+def build_task(host, reason, mode):
+    """拼给 AI 的自然语言任务。约束内建: 不重启整机、不删数据、先低风险。"""
+    ev = _recent_events(host)
+    lines = [
+        f"你是负责服务器 {host} 的运维 agent。面板检测到该节点异常。",
+        "",
+        f"异常摘要: {reason}",
+        "",
+        "近期事件:",
+    ]
+    lines += ["  - " + e for e in ev] if ev else ["  - (无)"]
+    lines += ["", "要求:"]
+    if mode == "fix":
+        lines += ["1. 先诊断根因, 命令只读优先。",
+                  "2. 需要修复时执行最小必要的改动; 严禁重启整机、严禁删除数据。",
+                  "3. 每步说明你做了什么、结果如何。",
+                  "4. 最后用不超过 3 行给出结论。"]
+    else:
+        lines += ["1. 只做诊断, 不要修改任何文件/服务/配置。",
+                  "2. 给出根因判断与建议的修复步骤(供人工执行)。",
+                  "3. 最后用不超过 3 行给出结论。"]
+    return "\n".join(lines)
+
+
+def _run_ai(host, reason, mode, cfg):
+    """同步执行一次 agent 调用, 把结果写库并推送。返回记录 dict。"""
+    hc = ai_host_conf(cfg, host)
+    cli_name = hc["cli"]
+    tmpl = (cfg.get("custom_clis") or {}).get(cli_name) or "{prompt}"
+    prompt = build_task(host, reason, mode)
+    # 模板里的 {prompt} 用 shell 单引号安全转义后替换
+    call = tmpl.replace("{prompt}", _shq(prompt))
+    full = f"cd {_shq(hc['workdir'])} && {call}"
+    c = db()
+    cur = c.execute("INSERT INTO ai_fixes(host,reason,cli,mode,status,started_at) VALUES(?,?,?,?,?,?)",
+                    (host, reason[:500], cli_name, mode, "running", int(time.time())))
+    c.commit()
+    fid = cur.lastrowid
+    log_event(host, "info", f"AI {mode} 开始: {cli_name} #{fid}")
+    try:
+        r = term_run(host, full, timeout=int(hc.get("timeout") or 300))
+        if r.get("done"):
+            out = str(r.get("out", ""))
+            status = "done" if r.get("rc", 0) == 0 else "failed"
+        else:
+            out = str(r.get("msg") or "SSH 通道不可达")
+            status = "failed"
+    except Exception as e:
+        out, status = f"ERR {e}", "failed"
+    out = out[-8000:]
+    c.execute("UPDATE ai_fixes SET status=?, done_at=?, output=? WHERE id=?",
+              (status, int(time.time()), out, fid))
+    c.commit()
+    head = (out.strip().splitlines() or ["(无输出)"])[0][:160]
+    notify_ex("warn" if status == "failed" else "info", host,
+              f"AI {mode} {status}: {head}")
+    log_event(host, "ok" if status == "done" else "warn", f"AI {mode} #{fid} {status}: {head}")
+    return {"id": fid, "host": host, "cli": cli_name, "mode": mode,
+            "status": status, "output": out}
+
+
+def dispatch_fix(host, reason, mode=None, cfg=None):
+    """异步派发(不阻塞上报线程)。"""
+    cfg = cfg or _ai_cfg()
+    mode = mode or cfg.get("mode") or "report"
+    t = threading.Thread(target=_run_ai, args=(host, reason, mode, cfg), daemon=True)
+    t.start()
+    return {"ok": True, "host": host, "mode": mode, "status": "running"}
+
+
+def _auto_dispatch(host, reason):
+    """crit 上报时的自动派发入口: 受 enabled + cooldown 约束。"""
+    cfg = _ai_cfg()
+    if not cfg.get("enabled"):
+        return
+    now = int(time.time())
+    cd = int(cfg.get("cooldown_sec") or 1800)
+    with _AI_LOCK:
+        last = _AI_STATE.get(host, 0)
+        if now - last < cd:
+            return
+        _AI_STATE[host] = now
+    try:
+        dispatch_fix(host, reason, cfg=cfg)
+    except Exception as e:
+        log_event(host, "warn", f"AI 自动派发失败: {e}")
+
 
 # ---------- 节点巡检 (SSH 直采) ----------
 # agent.py 只在设计里, 没有部署到任何节点(节点上没有 fleet-agent 进程/systemd 单元),
@@ -4739,6 +4914,67 @@ def make_app():
         c.commit()
         log_event(host, "ok" if d.get("ok") else "err", f"self-heal {d.get('id')}: {d.get('out','')[:80]}")
         return jsonify({"ok": True})
+
+    # ---------- AI 自愈: 配置 / 探测 / 派发 / 记录 ----------
+    @app.get("/api/ai/config")
+    def api_ai_config_get():
+        if not need_auth(): return jsonify({"error":"unauth"}), 401
+        return jsonify({"ok": True, "config": _ai_cfg(), "probes": AI_PROBES})
+
+    @app.post("/api/ai/config")
+    def api_ai_config_set():
+        if not _can_write(request.headers): return jsonify({"error":"forbidden"}), 403
+        d = request.get_json(force=True, silent=True) or {}
+        cur = _ai_cfg()
+        for k in ("enabled", "mode", "cooldown_sec", "default_cli", "timeout"):
+            if k in d: cur[k] = d[k]
+        for k in ("hosts", "custom_clis"):
+            if isinstance(d.get(k), dict): cur[k].update(d[k])
+        _ai_save(cur)
+        _audit("info", "admin", "更新 AI 自愈配置", source="ai", operate="edit",
+               detail_en="Update AI self-heal config")
+        return jsonify({"ok": True, "config": cur})
+
+    @app.get("/api/ai/agents")
+    def api_ai_agents():
+        """实测某节点装了哪些 agent CLI。不传 host 则列出全部已纳管节点。"""
+        if not need_auth(): return jsonify({"error":"unauth"}), 401
+        host = (request.args.get("host") or "").strip()
+        if host:
+            return jsonify({"ok": True, "host": host, **probe_agents(host)})
+        try:
+            names = [r[0] for r in db().execute("SELECT name FROM hosts ORDER BY name").fetchall()]
+        except Exception:
+            names = []
+        out = {}
+        for n in names:
+            out[n] = probe_agents(n)
+        return jsonify({"ok": True, "hosts": out})
+
+    @app.post("/api/ai/fix")
+    def api_ai_fix():
+        if not _can_write(request.headers): return jsonify({"error":"forbidden"}), 403
+        d = request.get_json(force=True, silent=True) or {}
+        host = (d.get("host") or "").strip()
+        if not host: return jsonify({"ok": False, "error": "need host"}), 400
+        reason = (d.get("reason") or "人工触发").strip()[:500]
+        mode = d.get("mode") or None
+        return jsonify(dispatch_fix(host, reason, mode))
+
+    @app.get("/api/ai/fixes")
+    def api_ai_fixes():
+        if not need_auth(): return jsonify({"error":"unauth"}), 401
+        host = (request.args.get("host") or "").strip()
+        limit = min(200, request.args.get("limit", 20, type=int) or 20)
+        c = db()
+        if host:
+            rows = c.execute("""SELECT id,host,reason,cli,mode,status,started_at,done_at,output
+                                FROM ai_fixes WHERE host=? ORDER BY id DESC LIMIT ?""", (host, limit)).fetchall()
+        else:
+            rows = c.execute("""SELECT id,host,reason,cli,mode,status,started_at,done_at,output
+                                FROM ai_fixes ORDER BY id DESC LIMIT ?""", (limit,)).fetchall()
+        keys = ("id", "host", "reason", "cli", "mode", "status", "started_at", "done_at", "output")
+        return jsonify({"ok": True, "list": [dict(zip(keys, r)) for r in rows]})
 
     @app.post("/api/login")
     def api_login():
@@ -11823,6 +12059,45 @@ Filesystem      Size  Used Avail Use% Mounted on
        </div>
       </div>
      </div>
+     <div class="card pane" style="margin-top:14px">
+      <div class="head"><h2>AI 自愈<small>异常自动派发给节点自带的 agent</small></h2>
+       <div class="acts"><button class="btn ghost" onclick="aiCfgLoad()">刷新</button><button class="btn" onclick="aiCfgSave()">保存</button></div></div>
+      <div class="body cfg-form">
+       <div class="el-form-item">
+        <div class="el-form-item__label">总开关</div>
+        <div class="el-form-item__content">
+         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2)"><input type=checkbox id=aien> 启用（crit 异常时自动派发）</label>
+        </div>
+       </div>
+       <div class="el-form-item">
+        <div class="el-form-item__label">模式</div>
+        <div class="el-form-item__content">
+         <select id=aimode class="sel" style="width:200px">
+          <option value="report">report（只诊断，不改动）</option>
+          <option value="fix">fix（允许执行修复）</option>
+         </select>
+         <span style="margin-left:12px;color:var(--text2);font-size:13px">冷却(秒)</span>
+         <input id=aicd class="ipt" style="width:90px">
+         <span style="margin-left:12px;color:var(--text2);font-size:13px">默认 CLI</span>
+         <input id=aicli class="ipt" style="width:110px" placeholder="claude">
+        </div>
+       </div>
+       <div class="el-form-item">
+        <div class="el-form-item__label">节点 CLI 实测</div>
+        <div class="el-form-item__content">
+         <button class="btn ghost" onclick="aiProbe()">探测全部节点已装的 CLI</button>
+         <div id=ai-probe-out style="margin-top:8px;font-size:13px;color:var(--text2);white-space:pre-wrap"></div>
+        </div>
+       </div>
+       <div class="el-form-item">
+        <div class="el-form-item__label">修复记录</div>
+        <div class="el-form-item__content" style="flex:1">
+         <table class="tbl"><thead><tr><th>ID</th><th>节点</th><th>CLI</th><th>模式</th><th>状态</th><th>开始</th><th>操作</th></tr></thead>
+          <tbody id=ai-fix-tb></tbody></table>
+        </div>
+       </div>
+      </div>
+     </div>
     </div>
     <div id="cfg-backup-body" class="cfg-pane" style="display:none">
      <div class="card pane">
@@ -17829,7 +18104,7 @@ function cfgTab(t){
  else if(t==='快照')cfgSnapLoad();
  else if(t==='API Key')cfgKeyLoad();
  else if(t==='关于')cfgAboutLoad();
- else if(t==='告警通知')aload();
+ else if(t==='告警通知'){aload();aiCfgLoad();}
 }
 function cfgApplyRadio(gid,val){
  const g=document.getElementById(gid);if(!g)return;
@@ -18038,6 +18313,54 @@ async function asave(){const a={thresholds:{load1:+document.getElementById('al')
  const r=await fetch('/api/alert',{method:'POST',headers:{'Content-Type':'application/json','X-Fleet-Token':TOK},body:JSON.stringify(a)});
  const d=await r.json();fpToast(d.ok?'告警设置已保存':('ERR '+(d.error||'')),d.ok?'success':'error');}
 async function atest(){const r=await fetch('/api/notify/test',{method:'POST',headers:{'X-Fleet-Token':TOK}});const d=await r.json().catch(()=>({}));fpToast(d.ok?'已触发测试通知':'测试通知失败',d.ok?'success':'error');}
+/* ===== AI 自愈配置 / 探测 / 记录 ===== */
+async function aiCfgLoad(){
+ let d={};try{d=await (await fetch('/api/ai/config')).json();}catch(e){}
+ const c=d.config||{};
+ const en=document.getElementById('aien');if(en)en.checked=!!c.enabled;
+ const md=document.getElementById('aimode');if(md)md.value=c.mode||'report';
+ const cd=document.getElementById('aicd');if(cd)cd.value=c.cooldown_sec||1800;
+ const cl=document.getElementById('aicli');if(cl)cl.value=c.default_cli||'claude';
+ aiFixLoad();
+}
+async function aiCfgSave(){
+ const body={enabled:document.getElementById('aien').checked,
+  mode:document.getElementById('aimode').value,
+  cooldown_sec:+document.getElementById('aicd').value||1800,
+  default_cli:document.getElementById('aicli').value.trim()||'claude'};
+ const r=await fetch('/api/ai/config',{method:'POST',headers:chdr(),body:JSON.stringify(body)});
+ const d=await r.json().catch(()=>({}));
+ fpToast(d.ok?'AI 自愈配置已保存':('ERR '+(d.error||'')),d.ok?'success':'error');
+}
+async function aiProbe(){
+ const out=document.getElementById('ai-probe-out');if(out)out.textContent='探测中…（逐台 SSH，可能需要一会儿）';
+ let d={};try{d=await (await fetch('/api/ai/agents')).json();}catch(e){}
+ const hs=d.hosts||{};const lines=[];
+ Object.keys(hs).sort().forEach(k=>{
+  const v=hs[k]||{};
+  lines.push(k+' : '+(v.ok?((v.found||[]).join(', ')||'(未装任何 agent CLI)'):('不可达 '+(v.error||''))));
+ });
+ if(out)out.textContent=lines.join('\n')||'(无节点)';
+}
+async function aiFixLoad(){
+ const tb=document.getElementById('ai-fix-tb');if(!tb)return;
+ let d={};try{d=await (await fetch('/api/ai/fixes?limit=20')).json();}catch(e){}
+ const rows=d.list||[];
+ tb.innerHTML=rows.length?rows.map(r=>{
+  const t=r.started_at?new Date(r.started_at*1000).toLocaleString():'-';
+  const st=r.status==='done'?'<span class="sev sev-ok">完成</span>':r.status==='failed'?'<span class="sev sev-crit">失败</span>':'<span class="sev sev-warn">运行中</span>';
+  return `<tr><td>${r.id}</td><td>${r.host||'-'}</td><td>${r.cli||'-'}</td><td>${r.mode||'-'}</td><td>${st}</td><td class="mb8">${t}</td>
+   <td><a class="btn link" onclick="aiFixView(${r.id})">查看</a></td></tr>`;}).join(''):'<tr><td colspan=7 class="empty">暂无记录</td></tr>';
+}
+let AI_FIX_CACHE=[];
+async function aiFixView(id){
+ if(!AI_FIX_CACHE.length){try{const d=await (await fetch('/api/ai/fixes?limit=50')).json();AI_FIX_CACHE=d.list||[];}catch(e){}}
+ const r=AI_FIX_CACHE.find(x=>x.id===id);
+ if(!r)return fpToast('记录已过期，请刷新','error');
+ const t=r.started_at?new Date(r.started_at*1000).toLocaleString():'-';
+ const t2=r.done_at?new Date(r.done_at*1000).toLocaleString():'-';
+ prompt(`${r.host} · ${r.cli} · ${r.mode} · ${r.status}\n开始 ${t}  结束 ${t2}\n\n异常: ${r.reason||''}`,r.output||'(无输出)');
+}
 /* ===== 证书 ===== */
 const CERTS={rows:[],view:[],sel:new Set(),kw:''};
 function chdr(){return {'Content-Type':'application/json','X-Fleet-Token':TOK};}
@@ -18322,7 +18645,7 @@ async function ndload(){
     <td><span class="sev sev-${sevcls}">${st}</span> <span class="mb8">${h.ip||'-'}</span></td>
     <td class="mb8">v2.4.2</td>
     <td><span>CPU 负载 <b>${cpu}</b></span><span class="mb8" style="margin-left:10px">| 内存 <b>${h.mem==null?'-':h.mem+'%'}</b></span><span class="mb8" style="margin-left:10px">| 磁盘 <b>${h.disk==null?'-':h.disk+'%'}</b></span></td>
-    <td><a class="btn link" onclick="hTerm('${(h.name||'').replace(/'/g,'')}')">终端</a> <a class="btn link" onclick="hLogs('${(h.name||'').replace(/'/g,'')}')">日志</a> <a class="btn link" onclick="hReboot('${(h.name||'').replace(/'/g,'')}')">重启</a></td>
+    <td><a class="btn link" onclick="hTerm('${(h.name||'').replace(/'/g,'')}')">终端</a> <a class="btn link" onclick="hLogs('${(h.name||'').replace(/'/g,'')}')">日志</a> <a class="btn link" onclick="aiFix('${(h.name||'').replace(/'/g,'')}')">AI 修复</a> <a class="btn link" onclick="hReboot('${(h.name||'').replace(/'/g,'')}')">重启</a></td>
    </tr>`;});
  const ntb=document.getElementById('node-tb');
  if(ntb)ntb.innerHTML=rows.join('')||'<tr><td colspan=5 class="empty">暂无数据</td></tr>';
@@ -18482,6 +18805,34 @@ async function hReboot(host){const svc=prompt('重启 '+host+' 上的哪个服�
  if(!confirm('确认重启 '+host+' 的 '+svc+' 服务？'))return;
  const out=await runTerm(host,'systemctl restart '+svc+' 2>&1; systemctl is-active '+svc);
  alert('重启 '+host+' 的 '+svc+'\n'+out);}
+// ---- AI 修复: 派发给该节点自带的 agent CLI, 完成后弹出报告 ----
+async function aiFix(host){
+  const cfg=await (await fetch('/api/ai/config')).json();
+  const mode=c=>((c||{}).config||{}).mode||'report';
+  const m=prompt('AI 修复 '+host+'\n模式(report=只诊断 / fix=允许修复):',mode(cfg));
+  if(!m)return;
+  if(!['report','fix'].includes(m))return alert('模式只能是 report 或 fix');
+  const reason=prompt('异常描述(可留空):','')||'人工触发';
+  if(m==='fix'&&!confirm('fix 模式会让该节点上的 AI 执行修复动作，确认？'))return;
+  const r=await fetch('/api/ai/fix',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({host:host,reason:reason,mode:m})});
+  const d=await r.json();
+  if(!d.ok)return alert('派发失败: '+(d.error||JSON.stringify(d)));
+  fpToast('已派发给 '+host+' 的 AI ('+m+')，完成后会弹报告');
+  // 轮询该节点的修复记录，等这条变成终态
+  const startId=d.id||0;
+  for(let i=0;i<120;i++){
+    await new Promise(s=>setTimeout(s,5000));
+    let list=[];
+    try{const j=await (await fetch('/api/ai/fixes?host='+encodeURIComponent(host)+'&limit=5')).json();list=j.list||[];}catch(e){continue;}
+    const rec=list.find(x=>x.status==='done'||x.status==='failed');
+    if(!rec)continue;
+    alert('AI '+m+' '+rec.status+' ('+rec.cli+')\n\n'+(rec.output||'(无输出)').slice(0,4000));
+    ndload();
+    return;
+  }
+  fpToast('AI 任务仍在运行，稍后到 AI 修复记录里看结果');
+}
 // ---- 模型账号 / MCP / 模板 / 运行环境 / APP Key / 资源同步 / 高可用 ----
 function mkCols(){return {models:['名称','模型供应商','API 类型','Base URL','API Key','验证状态','时间'],
  mcp:['名称','外部连接地址','状态','日志','时间'],
