@@ -9049,7 +9049,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .main::-webkit-scrollbar-track{background:transparent}
  .main::-webkit-scrollbar-thumb{background:rgba(144,147,153,.3);border-radius:4px}
  .main::-webkit-scrollbar-thumb:hover{background:rgba(144,147,153,.5)}
- /* ===== 左侧栏 (浅色, 
+ /* ===== 左侧栏 (浅色) ===== */
  .sidebar{width:var(--panel-menu-width);background:linear-gradient(var(--panel-menu-bg-color),var(--panel-menu-bg-color)) no-repeat top;background-color:var(--card);color:var(--text1);display:flex;flex-direction:column;
  position:fixed;top:0;bottom:0;left:0;z-index:100}
  .fixed{position:fixed;left:0;top:0;z-index:100;flex-shrink:0}
@@ -14855,7 +14855,7 @@ function svcLoad(){
  }).catch(()=>{const tb=document.getElementById('svc-tb');if(tb)tb.innerHTML='<tr><td colspan="5" class="empty">暂无数据</td></tr>';});
 }
 
-/* ---------- 主机日志（
+/* ---------- 主机日志: journald 分页 + 时间范围/优先级/服务 + 追踪抽屉 ---------- */
 var HL_PRI=[['0','紧急 Emergency'],['1','警报 Alert'],['2','严重 Critical'],['3','错误 Error'],['4','警告 Warning'],['5','通知 Notice'],['6','信息 Info'],['7','调试 Debug']];
 HL_SYSCACHE={};
 HL_PAGES.host={root:'#hl-panel',built:false};
@@ -15140,7 +15140,7 @@ function lgExport(){
 }
 window.lgExport=lgExport;
 window.lgRefresh=lgRefresh;window.lgTimer=lgTimer;window.lgTimerMenu=lgTimerMenu;window.lgKw=lgKw;window.lgSearch=lgSearch;window.lgSel=lgSel;window.lgPgSize=lgPgSize;window.lgPg=lgPg;window.lgClear=lgClear;window.lgTip=lgTip;window.lgTipHide=lgTipHide;
-/* ---------- 日志审计（
+/* ---------- 日志审计: operation/ssh/website 日志表格 ---------- */
 var LG_STATE={operation:{res:'',status:'',node:'',kw:'',page:1,size:20,timer:0,total:0,items:[]},
               access:{status:'',kw:'',page:1,size:20,timer:0,total:0,items:[]},
               sys:{svc:'',pri:'',status:'',kw:'',page:1,size:20,timer:0,total:0,items:[]},
@@ -15358,7 +15358,7 @@ function lgClear(t){
 function lgConfirmClear(t){
  return window.confirm('此操作将删除全部「'+(LG_SUBNAME[t]||'日志')+'」，是否继续？');
 }
-/* ---------- 网站日志（
+/* ---------- 网站日志: 运行日志/错误日志 + 网站下拉 + 追踪 + 下载 + 清空 ---------- */
 function lgWsInit(){
  if(LG_WS.sites.length){lgWsFill();lgWsLoad();return;}
  fetch('/api/sites').then(r=>r.json()).then(d=>{
@@ -15454,7 +15454,7 @@ function renderMemo(){
  const c=document.getElementById('ov-caro');if(c)c.classList.toggle('memo-editing-paused',memoEditing);
 }
 function escHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-/* 
+/* Markdown 渲染(local): md-editor-v3 风格预览, 输出已转义 */
 function memoMd(src){
  if(!src)return '';
  const esc=escHtml;
