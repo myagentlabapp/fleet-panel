@@ -1,4 +1,20 @@
 """fleet-panel server — 多机总览 + 异常通知 + agent 自愈闭环。
+Copyright (C) 2026 fleet-panel contributors (YangYong / MyAgentLab)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
+
+基于 / 借鉴 1Panel 社区版 (GPL-3.0) 改编，所有引用内容已按 GPL-3.0 保留版权声明。
 
 启动:  python3 app.py [--port 8ghz]
 依赖:  flask(已装)。数据落在 data/ 下 sqlite,前端走 / 的 SPA 页(无构建)。
