@@ -9639,6 +9639,13 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .btn.danger:hover{background:rgba(245,108,108,.1)}
  .btn.link{background:none;border:none;color:var(--primary);padding:0 6px;height:auto}
  .btn.link:hover{opacity:.75}
+ /* 刷新图标按钮全局兜底: 之前只有 #sites/#term/#audit/#hl-panel 有 scoped 规则,
+    MCP/GPU/Skills Hub/基准测试 四个页面没覆盖 -> 裸 button 退化成 316x159 + svg 300x150 的巨大方块 */
+ .fresh-button{box-sizing:border-box;width:32px;height:32px;flex:none;padding:0;border:1px solid var(--el-border-color,#dcdfe6);border-radius:4px;
+  background:#fff;color:#606266;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1;transition:color .15s,border-color .15s,background .15s}
+ .fresh-button:hover{color:var(--primary,#005eeb);border-color:#c6e2ff;background:#ecf5ff}
+ .fresh-button .el-icon{width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;line-height:0}
+ .fresh-button svg{width:14px;height:14px;flex:none;fill:currentColor;display:block}
  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
  .ml{margin-left:auto}
  /* ===== 总览 ===== */
