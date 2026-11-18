@@ -14,7 +14,17 @@ def sh(cmd, timeout=20):
     except Exception as e:
         return f"ERR {e}"
 
-def measure(token):
+def ping_ms(addr="10.8.0.1", timeout=2, count=3):
+    """ICMP 往返延迟(ms)。面板 hub(10.8.0.1) 即面板所在地, 与面板对节点的探测对称。
+    发 3 包取最小值, 抗链路抖动/丢包。"""
+    try:
+        o = sh(f"ping -n -c {count} -i 0.3 -W {timeout} {addr}")
+        hits = [float(x) for x in re.findall(r"time=([\d.]+)", o)]
+        return round(min(hits), 1) if hits else 0.0
+    except Exception:
+        return 0.0
+
+def measure():
     # load
     try:
         l1 = float(open("/proc/loadavg").read().split()[0])
@@ -36,10 +46,9 @@ def measure(token):
     # docker 容器数
     dc = sh("docker ps -q 2>/dev/null | wc -l")
     docker = int(re.search(r"\d+", dc).group()) if re.search(r"\d+", dc) else 0
-    latency = 0.0
     return {"host": args.host, "ip": local_ip(), "inet": "",
             "load1": round(l1, 2), "mem": round(mem, 1), "disk": round(disk, 1),
-            "docker": docker, "latency": latency}
+            "docker": docker, "latency": ping_ms()}
 
 def local_ip():
     s = None
@@ -75,7 +84,7 @@ def run_cmd(proc, cmd):
     return "unknown proc"
 
 def main():
-    global args
+    global args, base
     ap = argparse.ArgumentParser(); ap.add_argument("--server", required=True)
     ap.add_argument("--host", required=True); ap.add_argument("--interval", type=int, default=30)
     ap.add_argument("--token", default=os.environ.get("FLEET_TOKEN", "dev-token"))
