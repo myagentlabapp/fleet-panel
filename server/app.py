@@ -2959,10 +2959,11 @@ def _ai_save(cfg):
 
 
 def ai_host_conf(cfg, host):
-    """取某节点的 CLI 配置, 缺省回落全局 default_cli。model 单独从 hosts 覆盖或全局 models 取。"""
+    """取某节点的 CLI 配置, 缺省回落全局 default_cli。model 单独从 hosts 覆盖或全局 models 取。
+    workdir 留空 = 运行到节点该用户自己的 $HOME(各节点用户/路径不同, 不能写死)。"""
     h = dict(cfg.get("hosts", {}).get(host) or {})
     h.setdefault("cli", cfg.get("default_cli") or "claude")
-    h.setdefault("workdir", "/root")
+    h.setdefault("workdir", "")
     h.setdefault("timeout", cfg.get("timeout") or 300)
     if not h.get("model"):
         h["model"] = (cfg.get("models") or {}).get(h.get("cli")) or ""
@@ -3041,7 +3042,9 @@ def _run_ai(host, reason, mode, cfg):
     prompt = build_task(host, reason, mode, cfg)
     # 模板里的 {prompt} 用 shell 单引号安全转义后替换
     call = tmpl.replace("{prompt}", _shq(prompt))
-    full = f"cd {_shq(hc['workdir'])} && {call}"
+    # workdir 为空 = 用节点该用户自己的 $HOME; 指定了才 cd(避免写死 /home/yy 这种各机不存在的路径)
+    wd = (hc.get("workdir") or "").strip()
+    full = f"cd {_shq(wd)} && {call}" if wd else call
     c = db()
     cur = c.execute("INSERT INTO ai_fixes(host,reason,cli,mode,status,started_at) VALUES(?,?,?,?,?,?)",
                     (host, reason[:500], cli_name, mode, "running", int(time.time())))
@@ -18448,7 +18451,7 @@ async function aiNodeLoad(){
  tb.innerHTML=names.length?names.map(h=>{
   const cfg=hc[h]||{};
   const cli=cfg.cli||defCli;
-  const wd=cfg.workdir||'/home/yy';
+  const wd=cfg.workdir||'';
   const to=cfg.timeout||AI_NODE.cfg.timeout||300;
   const model=cfg.model||(AI_NODE.cfg.models||{})[cli]||'';
   const pb=AI_NODE.probe[h];
@@ -18457,7 +18460,7 @@ async function aiNodeLoad(){
    <td><b>${h}</b></td>
    <td class="mb8">${probed}</td>
    <td><input class="ipt" id="ain-cli-${h}" style="width:110px" value="${cli}"></td>
-   <td><input class="ipt" id="ain-wd-${h}" style="width:150px" value="${wd}"></td>
+   <td><input class="ipt" id="ain-wd-${h}" style="width:150px" value="${wd}" placeholder="留空=节点 HOME"></td>
    <td><input class="ipt" id="ain-to-${h}" style="width:80px" value="${to}"></td>
    <td><input class="ipt" id="ain-model-${h}" style="width:120px" value="${model}" placeholder="留空=全局"></td>
    <td><a class="btn link" onclick="aiNodeProbe('${h}')">探测</a> <a class="btn link" onclick="aiNodeSave('${h}')">保存</a> <a class="btn link" onclick="aiNodeClear('${h}')">清除</a></td>
@@ -18484,7 +18487,7 @@ async function aiNodeSave(h){
  const g=id=>{const e=document.getElementById(id);return e?e.value.trim():'';};
  const body={hosts:{}};
  const mv=g('ain-model-'+h);
- body.hosts[h]={cli:g('ain-cli-'+h)||'claude',workdir:g('ain-wd-'+h)||'/home/yy',timeout:+g('ain-to-'+h)||300};
+ body.hosts[h]={cli:g('ain-cli-'+h)||'claude',workdir:g('ain-wd-'+h),timeout:+g('ain-to-'+h)||300};
  if(mv)body.hosts[h].model=mv;
  const r=await fetch('/api/ai/config',{method:'POST',headers:chdr(),body:JSON.stringify(body)});
  const d=await r.json().catch(()=>({}));
