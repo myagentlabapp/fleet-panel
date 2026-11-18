@@ -11329,7 +11329,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
       </div>
       <table class="tbl"><thead><tr><th>节点</th><th>已装 CLI（实测）</th><th>使用 CLI</th><th>工作目录<small style="font-weight:400;color:var(--text2)"> 留空=自动</small></th><th>超时(s)</th><th>模型名</th><th>操作</th></tr></thead>
        <tbody id=ai-node-tb></tbody></table>
-      <div class="input-help" style="margin-top:8px">工作目录留空 = 自动落到该节点 <code>~/.fleet-agent/work/run-&lt;记录ID&gt;</code>，与「修复记录」里的每条记录一一对应，产物集中便于回收统计（推荐留空）。填了绝对路径则沿用该目录。</div>
+      <div style="margin-top:8px;font-size:12px;line-height:20px;color:var(--text3,#909399)">工作目录留空 = 自动落到该节点 <code>~/.fleet-agent/work/run-&lt;记录ID&gt;</code>，与「修复记录」里的每条记录一一对应，产物集中便于回收统计（推荐留空）。填了绝对路径则沿用该目录。</div>
       <div class="pager"><span class="ph" id=ai-node-total>共 0 条</span></div>
      </div>
     </div>
