@@ -852,17 +852,62 @@ def _wmon_rows():
 NODE_KEY = os.environ.get("FLEET_NODE_KEY", os.path.expanduser("~/.ssh/fleet_ed25519"))
 NODE_USER = os.environ.get("FLEET_NODE_USER", "root")
 
+# 节点寻址一律用内网域名 <节点名>.myagentlab.internal(由 wg0 侧 CoreDNS 解析)。
+# hosts.ip 仍保留原始地址(含 HK 两台公网 IP), 只作 WG 断线时的应急回落。
+NODE_DOMAIN_SUFFIX = "myagentlab.internal"
+
+
+def node_domain(name):
+    """节点名 → 内网域名; 空名返回空串。展示层唯一该输出的地址形态。"""
+    n = str(name or "").strip()
+    return f"{n}.{NODE_DOMAIN_SUFFIX}" if n else ""
+
+
+def node_addr(name, ip=""):
+    """SSH/采集用地址: 域名能解析就用域名, 解析不了才回落到 hosts.ip(应急)。"""
+    d = node_domain(name)
+    if d:
+        try:
+            socket.getaddrinfo(d, None)
+            return d
+        except Exception:
+            pass
+    return ip or d
+
+
+def _node_ip(name):
+    """查 hosts.ip 原值(应急回落地址); 查不到返回空串。"""
+    try:
+        row = db().execute("SELECT ip FROM hosts WHERE name=?", (name,)).fetchone()
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
+PANEL_DOMAIN = "fleet.myagentlab.internal"
+_PANEL_IPS = {"127.0.0.1", "10.8.0.1", "10.8.0.2", "192.168.1.250", "192.168.1.111",
+              "localhost", "0.0.0.0", ""}
+
+
+def _panel_host(h):
+    """面板自身访问地址: 传进来若是裸 IP/本机名, 统一换成人看的域名(面板入口固定 fleet.*)。"""
+    v = str(h or "").strip()
+    if v in _PANEL_IPS or re.fullmatch(r"\d+\.\d+\.\d+\.\d+", v):
+        return PANEL_DOMAIN
+    return v
+
 
 def _node_login(host):
-    """host(节点名/IP) → (addr, 终端主机记录 or None)。先查 hosts 表, 再查终端主机配置。"""
+    """host(节点名/IP) → (addr, 终端主机记录 or None)。先查 hosts 表, 再查终端主机配置。
+    返回值里的 addr 优先是内网域名(见 node_addr), 域名解析不了才回落 hosts.ip。"""
     h = str(host or "").strip()
     if not h:
         return None, None
     addr = None
     try:
-        row = db().execute("SELECT ip FROM hosts WHERE name=? OR ip=?", (h, h)).fetchone()
-        if row and row[0]:
-            addr = row[0]
+        row = db().execute("SELECT name,ip FROM hosts WHERE name=? OR ip=?", (h, h)).fetchone()
+        if row and row[1]:
+            addr = node_addr(row[0], row[1])
     except Exception:
         pass
     rec = None
@@ -879,8 +924,8 @@ def _node_login(host):
 
 
 def term_run(host, cmd, sudo=False, timeout=60):
-    # 本地
-    if host in ("", "this", "home-4c31g", socket.gethostname()):
+    # 本地(名字 / 域名两种写法都认)
+    if host in ("", "this", "home-4c31g", socket.gethostname(), node_domain(socket.gethostname())):
         full = cmd
         if sudo:
             full = "sudo " + cmd
@@ -895,21 +940,31 @@ def term_run(host, cmd, sudo=False, timeout=60):
     if not addr:
         return {"ok": True, "done": False, "msg": f"未找到节点 {host} 的地址(先在节点管理里纳管)"}
     full = ("sudo -n " + cmd) if sudo else cmd
-    if rec and rec.get("auth") == "password" and rec.get("password"):
-        r = ssh_exec(rec, full, timeout=timeout, pwd=rec["password"])
-    else:
+
+    def _ssh_once(target):
+        if rec and rec.get("auth") == "password" and rec.get("password"):
+            return ssh_exec(rec, full, timeout=timeout, pwd=rec["password"])
         args = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR"]
         if os.path.isfile(NODE_KEY):
             args += ["-i", NODE_KEY, "-o", "IdentitiesOnly=yes"]
         try:
-            p = _sp.run(args + [f"{NODE_USER}@{addr}", full],
+            p = _sp.run(args + [f"{NODE_USER}@{target}", full],
                         capture_output=True, text=True, timeout=timeout)
-            r = {"ok": True, "rc": p.returncode, "out": (p.stdout + p.stderr)[-4000:]}
+            return {"ok": True, "rc": p.returncode, "out": (p.stdout + p.stderr)[-4000:]}
         except _sp.TimeoutExpired:
-            r = {"ok": False, "rc": -1, "out": "执行超时"}
+            return {"ok": False, "rc": -1, "out": "执行超时"}
         except Exception as e:
-            r = {"ok": False, "rc": -1, "out": f"ERR {e}"}
+            return {"ok": False, "rc": -1, "out": f"ERR {e}"}
+
+    r = _ssh_once(addr)
+    # 域名优先: 域名通道挂了就回落 hosts.ip(应急), 成功则沿用; 记录实际用到的地址
+    if (not r.get("ok") or r.get("rc") == 255):
+        alt = _node_ip(host)
+        if alt and alt != addr:
+            r2 = _ssh_once(alt)
+            if r2.get("ok") and r2.get("rc") != 255:
+                r, addr = r2, alt
     # ssh 自身失败(rc=255)视为通道不可达, 让前端提示而不是当成命令输出
     if not r.get("ok") or r.get("rc") == 255:
         return {"ok": True, "done": False, "node": addr,
@@ -3152,7 +3207,8 @@ def node_poll_once():
     rows = c.execute("SELECT name,ip,inet FROM hosts").fetchall()
     me = socket.gethostname()
     for name, ip, inet in rows:
-        local = (name == me) or ip in ("10.8.0.1", "127.0.0.1")
+        # 10.8.0.1/10.8.0.2 都是面板机自己的 wg/容器网卡地址
+        local = (name == me) or ip in ("10.8.0.1", "10.8.0.2", "127.0.0.1")
         # 本地也采一遍(不跳过), 否则本地那行的数据会停在上次部署时, 越放越旧
         r = term_run("this" if local else name, _NODE_PROBE_CMD)
         if r.get("done"):
@@ -3160,7 +3216,7 @@ def node_poll_once():
                 load1, mem, disk, dc = str(r.get("out", "")).strip().splitlines()[-1].split("|")
                 report(name, ip, inet, {"load1": float(load1), "mem": float(mem),
                                         "disk": float(disk), "docker": int(dc),
-                                        "latency": 0.0 if local else _ping_ms(ip)})
+                                        "latency": 0.0 if local else _ping_ms(node_addr(name, ip))})
                 _NODE_STATE[name] = "ok"
                 continue
             except Exception as e:
@@ -3698,7 +3754,7 @@ def make_app():
         if not need_auth(): return jsonify({"error":"unauth"}), 401
         c = db()
         rows = c.execute("SELECT name,ip FROM hosts").fetchall()
-        return jsonify({"nodes": [{"name": r[0], "ip": r[1]} for r in rows]})
+        return jsonify({"nodes": [{"name": r[0], "ip": node_domain(r[0]), "backup_ip": r[1]} for r in rows]})
 
     # ---- 资源同步: 节点文件浏览 / 真实对传 ----
     def _local_ips():
@@ -4382,10 +4438,14 @@ def make_app():
                      load_ok,mem_ok,disk_ok,latency_ok,alerts,sev,at FROM hosts
                      ORDER BY sev DESC, name""").fetchall()
         now = int(time.time())
+        me = socket.gethostname()
         out = []
         for r in rows:
             (name,ip,inet,loaded,mem,disk,docker,lat, lk,mk,dk,wk,alerts,sev,at) = r
-            out.append({"name":name,"ip":ip,"inet":inet,"load1":loaded,"mem":mem,"disk":disk,
+            # 对外只给域名; 原始地址放 backup_ip 作应急记录(WG 断线时用)
+            dm = node_domain(name)
+            out.append({"name":name,"ip":dm,"inet":dm,"backup_ip":ip,
+                "local": name == me, "load1":loaded,"mem":mem,"disk":disk,
                 "docker":docker,"latency":lat,"alerts":alerts,"sev":sev,
                 "ago": now-at if at else None})
         return jsonify(out)
@@ -4682,12 +4742,14 @@ def make_app():
                     apps.append({"name": name, "tech": "compose", "services": running})
         except Exception: pass
         # ---- 多机主机TOP ----
-        hosts = [{"name": r[0], "ip": r[1], "load1": r[2], "mem": r[3], "disk": r[4],
+        _me = socket.gethostname()
+        hosts = [{"name": r[0], "ip": node_domain(r[0]), "backup_ip": r[1],
+                  "local": r[0] == _me, "load1": r[2], "mem": r[3], "disk": r[4],
                   "docker": r[5], "sev": r[6]} for r in c.execute(
             "SELECT name,ip,loaded,mem,disk,docker,sev FROM hosts ORDER BY sev DESC, name")]
         return jsonify({"ok": True,
             "hostname": hostname, "dist": dist, "kernel": kver, "arch": arch,
-            "ip": request.host.split(":")[0],
+            "ip": _panel_host(request.host.split(":")[0]),
             "boot": boot, "uptime": uptime, "load": load, "cores": cores, "cpu_model": cpu_model,
             "phys_cores": phys_cores, "cpu_mhz": cpu_mhz, "cpu_usage": cpu_usage,
             "mem": mem, "disk": disk,
@@ -5496,7 +5558,7 @@ def make_app():
         items = []
         for hr in (ov.get("hosts") or []):
             hv = hr.get("mem"); dv = hr.get("disk")
-            items.append({"node": hr.get("name"), "ip": hr.get("ip"),
+            items.append({"node": hr.get("name"), "ip": hr.get("ip") or node_domain(hr.get("name")),
                           "cpu": ("%s%%" % cpu_avg) if cpu_avg != "-" else "-",
                           "mem": ("%s%%" % hv) if hv is not None else "-",
                           "disk": ("%s%%" % dv) if dv is not None else "-",
@@ -5506,7 +5568,7 @@ def make_app():
         if not items:
             items.append({"node": host["hostname"], "ip": host["ip"], "cpu": cpu_avg, "mem": mem_avg,
                           "disk": disk.get("pct"), "docker": len(conts), "alerts": len(risks), "uptime": rate})
-        nodes = [{"name": x.get("name"), "ip": x.get("ip")} for x in (ov.get("hosts") or [])]
+        nodes = [{"name": x.get("name"), "ip": x.get("ip") or node_domain(x.get("name"))} for x in (ov.get("hosts") or [])]
         if not nodes: nodes = [{"name": host["hostname"], "ip": host["ip"]}]
 
         return {"ok": True, "days": days, "host": host, "score": score, "stats": stats,
@@ -18840,14 +18902,14 @@ async function ndload(){
  NODES.hosts=hosts;NODES.ov=ov;
  if(sel)sel.innerHTML=(hosts.length?hosts.map(h=>h.name):['主节点']).map(n=>`<option ${n===NODES.cur?'selected':''}>${n}</option>`).join('');
  const kw=((document.getElementById('nd-search')||{}).value||'').trim().toLowerCase();
- const rows=hosts.filter(h=>!kw||(h.name||'').toLowerCase().includes(kw)||(h.ip||'').includes(kw)).map(h=>{
+ const rows=hosts.filter(h=>!kw||(h.name||'').toLowerCase().includes(kw)||(h.ip||'').includes(kw)||(h.backup_ip||'').includes(kw)).map(h=>{
    const ok=h.sev=='ok',st=ok?'正常':h.sev==='warn'?'警告':'异常';
    const sevcls=h.sev?h.sev:'ok';
    // 每台节点的核数/内存总量都不一样, 这里只展示该节点自己的绝对量, 不套本地数据
    const cpu=h.load1==null?'-':Number(h.load1).toFixed(2);
    return `<tr>
-    <td><b>${h.name}</b> <span class="mb8">${h.inet||''}</span></td>
-    <td><span class="sev sev-${sevcls}">${st}</span> <span class="mb8">${h.ip||'-'}</span></td>
+    <td><b>${h.name}</b> <span class="mb8">${h.ip||''}</span></td>
+    <td><span class="sev sev-${sevcls}">${st}</span></td>
     <td class="mb8">v2.4.2</td>
     <td><span>CPU 负载 <b>${cpu}</b></span><span class="mb8" style="margin-left:10px">| 内存 <b>${h.mem==null?'-':h.mem+'%'}</b></span><span class="mb8" style="margin-left:10px">| 磁盘 <b>${h.disk==null?'-':h.disk+'%'}</b></span></td>
     <td><a class="btn link" onclick="hTerm('${(h.name||'').replace(/'/g,'')}')">终端</a> <a class="btn link" onclick="hLogs('${(h.name||'').replace(/'/g,'')}')">日志</a> <a class="btn link" onclick="aiFix('${(h.name||'').replace(/'/g,'')}')">AI 修复</a> <a class="btn link" onclick="hReboot('${(h.name||'').replace(/'/g,'')}')">重启</a></td>
@@ -18945,7 +19007,7 @@ function ndDbInfo(n){
 async function ndNodesLoad(){
  const tb=document.getElementById('nd-node-tb');if(!tb)return;
  let hosts=[];try{hosts=(await (await fetch('/api/hosts')).json())||[];}catch(e){}
- tb.innerHTML=hosts.map(h=>`<tr><td><b>${h.name}</b></td><td class="mb8">${h.ip||'-'}</td><td class="mb8">${h.ip==='10.8.0.2'?'主节点':'节点'}</td>
+ tb.innerHTML=hosts.map(h=>`<tr><td><b>${h.name}</b></td><td class="mb8">${h.ip||'-'}</td><td class="mb8">${h.local?'主节点':'节点'}</td>
   <td><span class="sev sev-${h.sev||'ok'}">${h.sev==='ok'?'正常':h.sev==='warn'?'警告':'异常'}</span></td>
   <td class="mb8">v2.4.2</td>
   <td><a class="btn link" onclick="hTerm('${h.name}')">终端</a> <a class="btn link" onclick="hLogs('${h.name}')">日志</a> <a class="btn link" onclick="hReboot('${h.name}')">重启</a></td></tr>`).join('')
@@ -18953,19 +19015,21 @@ async function ndNodesLoad(){
  const tot=document.getElementById('nd-node-total');if(tot)tot.textContent='共 '+hosts.length+' 条';
 }
 function ndNodeAdd(){
- const addr=location.origin, tok=TOK.slice(0,8)+'…';
+ // 入口一律给域名: 经域名访问时 location.origin 本就是域名; 用 IP 访问则换成固定面板域名
+ const isIp=/^\d+\.\d+\.\d+\.\d+$/.test(location.hostname);
+ const addr=isIp?('http://fleet.myagentlab.internal'+(location.port?':'+location.port:'')):location.origin, tok=TOK.slice(0,8)+'…';
  fpDrawer('添加节点','',`<div class="fp-form" style="padding:16px">
   <p style="color:var(--text2);font-size:13px;margin-bottom:10px">纳管方式：面板机用 SSH 免密(root + ~/.ssh/fleet_ed25519)直连节点，采集指标和执行终端命令都走这条通道。</p>
   <p><b>主节点地址：</b>${addr}</p>
   <p><b>接入 Token：</b>${tok} <a class="btn link" onclick="ndCopy('${TOK}')">复制</a></p>
-  <p><b>节点需满足：</b>面板机公钥已写入节点的 /root/.ssh/[authorized-keys]，且节点可达面板所在网络(WG 10.8.0.0/24)。</p>
-  <p style="color:var(--text3);font-size:12px;margin-top:10px">满足后在 hosts 表登记节点名与地址即可，面板每 ${'90'} 秒巡检一次。</p></div>`);}
+  <p><b>节点需满足：</b>面板机公钥已写入节点的 /root/.ssh/[authorized-keys]，且节点名能解析成内网域名 <code>&lt;节点名&gt;.myagentlab.internal</code> 并与面板机互通。</p>
+  <p style="color:var(--text3);font-size:12px;margin-top:10px">满足后在 hosts 表登记节点名即可(地址自动按内网域名推导，原始 IP 仅作应急回落)，面板每 ${'90'} 秒巡检一次。</p></div>`);}
 function ndCopy(t){if(navigator.clipboard){navigator.clipboard.writeText(t).then(()=>fpToast('已复制到剪贴板')).catch(()=>fpToast('复制失败','error'));}else fpToast('当前环境不支持剪贴板','error');}
 function ndNodeGen(){ndNodeAdd();}
 async function ndPanelsLoad(){
  const tb=document.getElementById('nd-panel-tb');if(!tb)return;
  let ov={};try{ov=await (await fetch('/api/overview')).json();}catch(e){}
- tb.innerHTML=`<tr><td><b>${location.host}</b></td><td class="mb8">主节点面板</td><td class="mb8">v2.4.2</td>
+ tb.innerHTML=`<tr><td><b>${ov.ip||location.host}</b></td><td class="mb8">主节点面板</td><td class="mb8">v2.4.2</td>
   <td><span class="sev sev-ok">正常</span></td>
   <td><a class="btn link" onclick="show('cfg')">设置</a></td></tr>`;
  const tot=document.getElementById('nd-panel-total');if(tot)tot.textContent='共 1 条';
@@ -19544,7 +19608,7 @@ function syTab(t){SY_TAB=t;
 async function syLoadNodes(){
  const d=await fetch('/api/sync/nodes').then(r=>r.json()).catch(()=>({}));
  const ns=(d.nodes||[]).map(n=>n.name+' ('+n.ip+')');
- if(!ns.length)ns.push('home-4c31g (192.168.1.250)');
+ if(!ns.length)ns.push('home-4c31g (home-4c31g.myagentlab.internal)');
  ['sy-l-node','sy-r-node'].forEach(id=>{const el=document.getElementById(id);if(!el)return;
   const cur=el.value;el.innerHTML='<option value="">选择节点</option>'+ns.map(n=>`<option>${n}</option>`).join('');
   if(cur)el.value=cur;});
