@@ -2826,7 +2826,14 @@ def db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, host TEXT, level TEXT, msg TEXT)""")
         c.execute("""CREATE TABLE IF NOT EXISTS ai_fixes(
             id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT, reason TEXT, cli TEXT,
-            mode TEXT, status TEXT, started_at INTEGER, done_at INTEGER, output TEXT)""")
+            mode TEXT, status TEXT, started_at INTEGER, done_at INTEGER, output TEXT, workdir TEXT)""")
+        # 幂等迁移: 老库 CREATE IF NOT EXISTS 不会加列, 这里补 workdir
+        try:
+            _cols = [r[1] for r in c.execute("PRAGMA table_info(ai_fixes)")]
+            if "workdir" not in _cols:
+                c.execute("ALTER TABLE ai_fixes ADD COLUMN workdir TEXT")
+        except Exception:
+            pass
         _conn.c = c
     return _conn.c
 
@@ -3042,15 +3049,22 @@ def _run_ai(host, reason, mode, cfg):
     prompt = build_task(host, reason, mode, cfg)
     # 模板里的 {prompt} 用 shell 单引号安全转义后替换
     call = tmpl.replace("{prompt}", _shq(prompt))
-    # workdir 为空 = 用节点该用户自己的 $HOME; 指定了才 cd(避免写死 /home/yy 这种各机不存在的路径)
-    wd = (hc.get("workdir") or "").strip()
-    full = f"cd {_shq(wd)} && {call}" if wd else call
     c = db()
     cur = c.execute("INSERT INTO ai_fixes(host,reason,cli,mode,status,started_at) VALUES(?,?,?,?,?,?)",
                     (host, reason[:500], cli_name, mode, "running", int(time.time())))
     c.commit()
     fid = cur.lastrowid
-    log_event(host, "info", f"AI {mode} 开始: {cli_name} #{fid}")
+    # workdir 三态: 显式填了 -> cd 该目录; 留空 -> 面板约定逐次工作区 $HOME/.fleet-agent/work/run-<fid>
+    # ($HOME 远端=root / 本地=yy 都可达可写; run-<fid> 与 ai_fixes 行号一对一, 产物好坏统计)
+    wd = (hc.get("workdir") or "").strip()
+    if wd:
+        full = f"cd {_shq(wd)} && {call}"
+        rec_wd = wd
+    else:
+        ws = "$HOME/.fleet-agent/work/run-%d" % fid
+        full = f"mkdir -p {ws} && cd {ws} && {call}"
+        rec_wd = f"~/.fleet-agent/work/run-{fid}"
+    log_event(host, "info", f"AI {mode} 开始: {cli_name} #{fid} @ {rec_wd}")
     try:
         r = term_run(host, full, timeout=int(hc.get("timeout") or 300))
         if r.get("done"):
@@ -3062,8 +3076,8 @@ def _run_ai(host, reason, mode, cfg):
     except Exception as e:
         out, status = f"ERR {e}", "failed"
     out = out[-8000:]
-    c.execute("UPDATE ai_fixes SET status=?, done_at=?, output=? WHERE id=?",
-              (status, int(time.time()), out, fid))
+    c.execute("UPDATE ai_fixes SET status=?, done_at=?, output=?, workdir=? WHERE id=?",
+              (status, int(time.time()), out, rec_wd, fid))
     c.commit()
     head = (out.strip().splitlines() or ["(无输出)"])[0][:160]
     notify_ex("warn" if status == "failed" else "info", host,
@@ -5008,12 +5022,12 @@ def make_app():
         limit = min(200, request.args.get("limit", 20, type=int) or 20)
         c = db()
         if host:
-            rows = c.execute("""SELECT id,host,reason,cli,mode,status,started_at,done_at,output
+            rows = c.execute("""SELECT id,host,reason,cli,mode,status,started_at,done_at,output,workdir
                                 FROM ai_fixes WHERE host=? ORDER BY id DESC LIMIT ?""", (host, limit)).fetchall()
         else:
-            rows = c.execute("""SELECT id,host,reason,cli,mode,status,started_at,done_at,output
+            rows = c.execute("""SELECT id,host,reason,cli,mode,status,started_at,done_at,output,workdir
                                 FROM ai_fixes ORDER BY id DESC LIMIT ?""", (limit,)).fetchall()
-        keys = ("id", "host", "reason", "cli", "mode", "status", "started_at", "done_at", "output")
+        keys = ("id", "host", "reason", "cli", "mode", "status", "started_at", "done_at", "output", "workdir")
         return jsonify({"ok": True, "list": [dict(zip(keys, r)) for r in rows]})
 
     @app.post("/api/login")
@@ -11336,6 +11350,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
     <div class="aifix-box">
      <div class="aifix-head"><span id="aifix-title"></span><span class="aifix-x" onclick="aiFixDlg(false)">×</span></div>
      <div class="aifix-meta" id="aifix-meta"></div>
+     <div class="aifix-meta" id="aifix-wd" style="margin-bottom:12px"></div>
      <div class="aifix-body"><div class="md-editor md-editor-previewOnly"><div class="md-editor-preview" id="aifix-md"></div></div></div>
     </div>
    </div>
@@ -18537,6 +18552,8 @@ async function aiFixView(id){
  const stLabel=r.status==='done'?'完成':(r.status==='failed'?'失败':'运行中');
  document.getElementById('aifix-title').textContent=`#${r.id} ${r.host||'-'} · ${r.cli||'-'} · ${r.mode||'-'} · ${stLabel}`;
  document.getElementById('aifix-meta').textContent=`开始 ${t}   结束 ${t2}   异常: ${r.reason||'(无)'}`;
+ const wdEl=document.getElementById('aifix-wd');
+ if(wdEl){wdEl.textContent=(r.workdir?('工作区: '+r.workdir):'工作区: —');}
  document.getElementById('aifix-md').innerHTML=memoMd(r.output||'(无输出)');
  aiFixDlg(true);
 }
