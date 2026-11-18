@@ -7,7 +7,8 @@ SERVER="${1:?用法: install.sh <server-url like http://fleet.myagentlab.interna
 SRC="$(cd "$(dirname "$0")" && pwd)/agent.py"
 DEST_DIR="/opt/fleet-agent"
 UNIT="/etc/systemd/system/fleet-agent.service"
-TOKEN="${FLEET_TOKEN:-sZ9ywgs7HEkGz37_l6aSo17kkhzOJRSX}"
+TOKEN="${FLEET_TOKEN:-}"
+[ -n "$TOKEN" ] || { echo "缺少 FLEET_TOKEN 环境变量(面板接入 token)"; exit 1; }
 
 HOST="$(hostname)"
 PY="$(command -v python3 || echo /usr/bin/python3)"

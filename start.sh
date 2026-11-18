@@ -5,14 +5,15 @@ cd "$(dirname "$0")/server"
 docker ps --format '{{.Names}}' | grep -qx fleet-nginx || {
   echo "[start] fleet-nginx 未运行, 启动..."
   docker run -d --name fleet-nginx --network host --restart unless-stopped \
-    -v /home/yy/fleet-panel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro \
-    -v /home/yy/fleet-panel/server/data:/home/yy/fleet-panel/server/data:ro \
+    -v "$(dirname "$0")/nginx/nginx.conf:/etc/nginx/nginx.conf:ro \
+    -v "$(dirname "$0")/server/data:/home/yy/fleet-panel/server/data:ro \
     nginx:alpine
 }
 # 精确匹配: pgrep -f 会匹配到引用了该字符串的其他进程(shell 包装/脚本自身), 造成自匹配假阳性
-pgrep -f "^python3 app\.py --port 8890$" >/dev/null || {
+pgrep -f "app\.py --port" >/dev/null || {
   echo "[start] 启动面板"
-  FLEET_NGINX_BIND=192.168.1.250 setsid nohup python3 app.py --port 8890 \
+  PORT="${FLEET_PORT:-8890}"
+  FLEET_NGINX_BIND=192.168.1.250 setsid nohup python3 app.py --port "$PORT" \
     > /tmp/fleet-panel.log 2>&1 < /dev/null & disown
 }
-echo "[start] 面板: http://127.0.0.1:8890 ; WAF 443: https://192.168.1.250"
+echo "[start] 面板: http://127.0.0.1:${PORT:-8890} ; WAF 443: https://192.168.1.250"

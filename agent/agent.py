@@ -14,8 +14,12 @@ def sh(cmd, timeout=20):
     except Exception as e:
         return f"ERR {e}"
 
-def ping_ms(addr="10.8.0.1", timeout=2, count=3):
-    """ICMP 往返延迟(ms)。面板 hub(10.8.0.1) 即面板所在地, 与面板对节点的探测对称。
+def ping_ms(addr=None, timeout=2, count=3):
+    if addr is None:
+        addr = os.environ.get("FLEET_HUB", "")
+    if not addr:
+        return 0.0
+    """ICMP 往返延迟(ms)。面板 hub 即面板所在地, 与面板对节点的探测对称。
     发 3 包取最小值, 抗链路抖动/丢包。"""
     try:
         o = sh(f"ping -n -c {count} -i 0.3 -W {timeout} {addr}")

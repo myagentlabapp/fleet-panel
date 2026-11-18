@@ -37,11 +37,65 @@ DATA = os.path.join(ROOT, "data")
 DB = os.path.join(DATA, "fleet.db")
 os.makedirs(DATA, exist_ok=True)
 
+# ---------- 站点事实配置 (env > server/data/site.json > 内置默认) ----------
+# 部署环境事实 (域名后缀/主机名/IP/版本/基础目录/端口) 统一收在这里; UI 可改的运行时设置仍走 panel_settings.json。
+def _read_version_file():
+    for cand in (os.path.join(os.path.dirname(ROOT), "VERSION"),
+                 os.path.join(ROOT, "VERSION")):
+        try:
+            with open(cand, encoding="utf-8") as f:
+                v = f.read().strip()
+                if v: return v
+        except Exception:
+            pass
+    return None
+
+def _load_site():
+    out = {}
+    try:
+        with open(os.path.join(DATA, "site.json"), encoding="utf-8") as f:
+            j = json.load(f)
+        if isinstance(j, dict): out = j
+    except Exception:
+        out = {}
+    _env_map = ("version","node_domain_suffix","panel_domain","panel_ips",
+                "local_host","base_dir","port")
+    _env_name = {"version":"FLEET_VERSION","node_domain_suffix":"FLEET_NODE_DOMAIN_SUFFIX",
+                 "panel_domain":"FLEET_PANEL_DOMAIN","panel_ips":"FLEET_PANEL_IPS",
+                 "local_host":"FLEET_LOCAL_HOST","base_dir":"FLEET_BASE","port":"FLEET_PORT"}
+    for k in _env_map:
+        v = os.environ.get(_env_name[k])
+        if v is not None and str(v).strip() != "":
+            out[k] = v
+    _defaults = {
+        "version": _read_version_file() or "v2.4.2",
+        "node_domain_suffix": "myagentlab.internal",
+        "panel_domain": "fleet.myagentlab.internal",
+        "panel_ips": "127.0.0.1,10.8.0.1,10.8.0.2,192.168.1.250,192.168.1.111",
+        "local_host": socket.gethostname(),
+        "base_dir": os.path.expanduser("~"),
+        "port": 8890,
+    }
+    for k, v in _defaults.items():
+        if k not in out or out.get(k) in (None, ""):
+            out[k] = v
+    if isinstance(out.get("panel_ips"), str):
+        out["_panel_ips_set"] = {x.strip() for x in out["panel_ips"].split(",") if x.strip()}
+    else:
+        out["_panel_ips_set"] = set(out.get("panel_ips") or [])
+    try:
+        out["port"] = int(out["port"])
+    except Exception:
+        out["port"] = 8890
+    return out
+
+SITE = _load_site()
+
 # ---------- Docker 网关 (通过 docker.sock / CLI) ----------
 def _docker(args, timeout=40, host=""):
     """返回 (ok, text)。host 空 = 本地(行为与历史完全一致); host 非空 = 走 SSH 在远端节点执行。
     远端复用 term_run 的免密通道(fleet_ed25519), 命令整体 base64 包裹防引号拆坏。"""
-    if not host or host in ("", "this", "home-4c31g", socket.gethostname()):
+    if not host or host in ("", "this", "local", socket.gethostname()):
         base = ["docker"]
         # 若 python 装了 docker 库可走 socket; 这里用 CLI 兼容最广
         try:
@@ -854,7 +908,7 @@ NODE_USER = os.environ.get("FLEET_NODE_USER", "root")
 
 # 节点寻址一律用内网域名 <节点名>.myagentlab.internal(由 wg0 侧 CoreDNS 解析)。
 # hosts.ip 仍保留原始地址(含 HK 两台公网 IP), 只作 WG 断线时的应急回落。
-NODE_DOMAIN_SUFFIX = "myagentlab.internal"
+NODE_DOMAIN_SUFFIX = SITE["node_domain_suffix"]
 
 
 def node_domain(name):
@@ -884,9 +938,8 @@ def _node_ip(name):
         return ""
 
 
-PANEL_DOMAIN = "fleet.myagentlab.internal"
-_PANEL_IPS = {"127.0.0.1", "10.8.0.1", "10.8.0.2", "192.168.1.250", "192.168.1.111",
-              "localhost", "0.0.0.0", ""}
+PANEL_DOMAIN = SITE["panel_domain"]
+_PANEL_IPS = SITE["_panel_ips_set"] | {"localhost", "0.0.0.0", ""}
 
 
 def _panel_host(h):
@@ -925,7 +978,7 @@ def _node_login(host):
 
 def term_run(host, cmd, sudo=False, timeout=60):
     # 本地(名字 / 域名两种写法都认)
-    if host in ("", "this", "home-4c31g", socket.gethostname(), node_domain(socket.gethostname())):
+    if host in ("", "this", "local", socket.gethostname(), node_domain(socket.gethostname())):
         full = cmd
         if sudo:
             full = "sudo " + cmd
@@ -1429,7 +1482,7 @@ def _tsess_gc():
 threading.Thread(target=_tsess_gc, daemon=True).start()
 
 # ---------- 文件管理 (D1) ----------
-ALLOWED_DIRS = [os.environ.get("FLEET_BASE", "/home/yy"), "/mnt", "/tmp", "/srv", "/"]
+ALLOWED_DIRS = [SITE["base_dir"], "/mnt", "/tmp", "/srv", "/"]
 
 def _safe_path(p):
     """仅允许 ALLOWED_DIRS 白名单内的绝对路径(含其子路径)。"""
@@ -3208,7 +3261,7 @@ def node_poll_once():
     me = socket.gethostname()
     for name, ip, inet in rows:
         # 10.8.0.1/10.8.0.2 都是面板机自己的 wg/容器网卡地址
-        local = (name == me) or ip in ("10.8.0.1", "10.8.0.2", "127.0.0.1")
+        local = (name == me) or ip in SITE["_panel_ips_set"]
         # 本地也采一遍(不跳过), 否则本地那行的数据会停在上次部署时, 越放越旧
         r = term_run("this" if local else name, _NODE_PROBE_CMD)
         if r.get("done"):
@@ -3260,7 +3313,10 @@ def make_app():
 
     @app.get("/")
     def index():
-        return render_template_string(HTML, SESSION_TOKEN=APITOKEN)
+        return render_template_string(HTML, SESSION_TOKEN=APITOKEN,
+            PANEL_VERSION=PANEL_VERSION, LOCAL_HOST=SITE["local_host"],
+            NODE_DOMAIN_SUFFIX=NODE_DOMAIN_SUFFIX, PANEL_DOMAIN=PANEL_DOMAIN,
+            BASE_DIR=SITE["base_dir"], PORT=SITE["port"])
 
     @app.get("/favicon.ico")
     def favicon():
@@ -3784,7 +3840,7 @@ def make_app():
 
     def _sync_ls(node, path):
         local, h = _sync_node(node)
-        path = path or "/home/yy"
+        path = path or SITE["base_dir"]
         if local:
             try:
                 ents = []
@@ -3814,7 +3870,7 @@ def make_app():
     @app.get("/api/sync/fs")
     def api_sync_fs():
         if not need_auth(): return jsonify({"error": "unauth"}), 401
-        return jsonify(_sync_ls(request.args.get("node", ""), request.args.get("path", "/home/yy")))
+        return jsonify(_sync_ls(request.args.get("node", ""), request.args.get("path", SITE["base_dir"])))
 
     def _sync_transfer(kind, src, dst_node, dst, image=""):
         """执行一次真实对传, 返回 {ok, log}"""
@@ -3926,7 +3982,7 @@ def make_app():
     def api_tamper():
         if not need_auth(): return jsonify({"error":"unauth"}), 401
         try:
-            r = _sp.run(["find", "/home/yy", "-maxdepth", "3", "-type", "f", "-newer", "/tmp", "-mmin", "-10080"],
+            r = _sp.run(["find", SITE["base_dir"], "-maxdepth", "3", "-type", "f", "-newer", "/tmp", "-mmin", "-10080"],
                         capture_output=True, text=True, timeout=10)
             files = [x for x in r.stdout.splitlines() if x][:20]
         except Exception:
@@ -4860,12 +4916,12 @@ def make_app():
     PS_FILE = os.path.join(DATA, "panel_settings.json")
     SNAP_DIR = os.path.join(DATA, "snapshots")
     _PANEL_START = time.time()
-    PANEL_VERSION = "v2.4.2"
+    PANEL_VERSION = SITE["version"]
     PS_DEFAULT = {"theme": "light", "primary": "#005eeb", "menuTabs": "Disable", "watermark": "Disable",
                   "lang": "中文(简体)", "timeout": 86400, "accessAddr": "", "proxy": "",
                   "hiddenMenu": [], "region": "跟随运行区域（默认）", "backupAccts": [],
                   "license": "", "licenseTime": "",
-                  "port": 8890, "entrance": "", "sessionTimeout": 86400, "allowIPs": "",
+                  "port": SITE["port"], "entrance": "", "sessionTimeout": 86400, "allowIPs": "",
                   "twoFactor": "Disable"}
 
     def _ps_read():
@@ -8461,7 +8517,7 @@ def make_app():
         # 来不及拉起新进程。故交给一个已脱离的 shell: 先睡 1s, 再杀旧进程, 再启动。
         import subprocess
         subprocess.Popen(
-            "setsid bash -c 'sleep 1; pkill -9 -f " + '"' + "[a]pp.py --port 8890" + '"' + "; sleep 1; exec bash /tmp/start-panel.sh' </dev/null >/tmp/fleet-restart.log 2>&1 &",
+            "setsid bash -c 'sleep 1; pkill -9 -f " + '"' + f"[a]pp.py --port {SITE['port']}" + '"' + "; sleep 1; exec bash -c 'cd " + ROOT + " && exec python3 app.py --port " + str(SITE['port']) + "' </dev/null >/tmp/fleet-restart.log 2>&1 &",
             shell=True, start_new_session=True)
         return jsonify({"ok": 1, "msg": "面板重启已触发"})
 
@@ -11561,7 +11617,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
        <div class="content-container__title">
         <div class="ck-left"><a class="btn" onclick="ckCreate()">创建</a><a class="btn ghost" onclick="ckImport()">导入</a><a class="btn ghost" onclick="ckPrune('containers')">清理容器</a></div>
         <div class="ck-right">
-         <select class="sel" id=ck-node style="height:30px;margin-right:8px" onchange="CK_NODE=this.value;dload()" title="选择节点"><option value="">本地 (home-4c31g)</option></select>
+         <select class="sel" id=ck-node style="height:30px;margin-right:8px" onchange="CK_NODE=this.value;dload()" title="选择节点"><option value="">本地 ({{ LOCAL_HOST }})</option></select>
          <div class="el-radio-group">
           <label class="el-radio-button el-radio-button--default el-tooltip__trigger" title="卡片视图"><input class="el-radio-button__original-radio" type="radio"><span class="el-radio-button__inner"><svg class="vi" viewBox="0 0 1024 1024"><path fill="currentColor" d="M640 384v256H384V384h256zm64 0h192v256H704V384zm-64 512H384V704h256v192zm64 0V704h192v192H704zm-64-768v192H384V128h256zm64 0h192v192H704V128zM320 384v256H128V384h192zm0 512H128V704h192v192zm0-768v192H128V128h192z"/></svg></span></label>
           <label class="el-radio-button is-active el-radio-button--default el-tooltip__trigger" title="表格视图"><input class="el-radio-button__original-radio" type="radio" checked><span class="el-radio-button__inner"><svg class="vi" viewBox="0 0 1024 1024"><path fill="currentColor" d="M704 192h160v736H160V192h160v64h384v-64zM288 512h448v-64H288v64zm0 256h448v-64H288v64zm96-576V96h256v96H384z"/></svg></span></label>
@@ -11713,7 +11769,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
           <label class="el-radio-button is-active el-radio-button--default" title="列表模式" onclick="sitesMode('table',this)"><input class="el-radio-button__original-radio" type="radio" value="table"><span class="el-radio-button__inner"><i class="el-icon"><svg class="svg-icon"><use xlink:href="#p-list"></use></svg></i></span></label>
          </div>
          <div class="el-select el-select--default p-w-200"><div class="el-select__wrapper"><div class="el-select__prefix">类型</div><select id=sf-type class="el-select__native" onchange="sload()"><option value="">请选择</option><option>反向代理</option><option>静态</option><option>应用</option></select><div class="el-select__suffix"><i class="el-icon el-select__caret el-select__icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="M831.872 340.864 512 652.672 192.128 340.864a30.59 30.59 0 0 0-42.752 0 29.12 29.12 0 0 0 0 41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.728 30.59 30.59 0 0 0-42.752 0z"></path></svg></i></div></div></div>
-         <select class="sel" id=s-node style="height:30px;margin-right:8px" onchange="SITE_NODE=this.value;sload()" title="选择节点"><option value="">本地 (home-4c31g)</option></select>
+         <select class="sel" id=s-node style="height:30px;margin-right:8px" onchange="SITE_NODE=this.value;sload()" title="选择节点"><option value="">本地 ({{ LOCAL_HOST }})</option></select>
          <div class="el-select el-select--default p-w-200"><div class="el-select__wrapper"><div class="el-select__prefix">分组</div><select id=sf-group class="el-select__native" onchange="sload()"><option>所有</option></select><div class="el-select__suffix"><i class="el-icon el-select__caret el-select__icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="M831.872 340.864 512 652.672 192.128 340.864a30.59 30.59 0 0 0-42.752 0 29.12 29.12 0 0 0 0 41.6L489.664 714.24a32 32 0 0 0 44.672 0l340.288-331.712a29.12 29.12 0 0 0 0-41.728 30.59 30.59 0 0 0-42.752 0z"></path></svg></i></div></div></div>
          <div style="width:200px;height:32px"><div class="search-button"><div class="el-input el-input--default el-input--suffix"><div class="el-input__wrapper"><input id=sf-name class="el-input__inner" type="text" placeholder="搜索" oninput="sload()"><span class="el-input__suffix"><span class="el-input__suffix-inner"><i class="el-icon el-input__icon el-input__clear" style="visibility:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="currentColor" d="m466.752 512-90.496-90.496a32 32 0 0 1 45.248-45.248L512 466.752l90.496-90.496a32 32 0 1 1 45.248 45.248L557.248 512l90.496 90.496a32 32 0 1 1-45.248 45.248L512 557.248l-90.496 90.496a32 32 0 0 1-45.248-45.248z"></path><path fill="currentColor" d="M512 896a384 384 0 1 0 0-768 384 384 0 0 0 0 768m0 64a448 448 0 1 1 0-896 448 448 0 0 1 0 896"></path></svg></i><i class="el-icon el-input__icon"><svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="m795.904 750.72 124.992 124.928a32 32 0 0 1-45.248 45.248L750.656 795.904a416 416 0 1 1 45.248-45.248zM480 832a352 352 0 1 0 0-704 352 352 0 0 0 0 704z"></path></svg></i></span></span></div></div></div></div>
          <button type="button" class="el-button el-button--default fresh-button" onclick="sload()"><i class="el-icon"><svg class="svg-icon"><use xlink:href="#p-refresh"></use></svg></i></button>
@@ -12031,7 +12087,7 @@ Filesystem      Size  Used Avail Use% Mounted on
      <div class="body">
       <div class="row" style="margin-bottom:14px">
        <input id="csearch" class="ipt" placeholder="搜索域名/备注" style="width:220px" oninput="cload()">
-       <select class="sel" id="c-node" style="height:30px" onchange="CERT_NODE=this.value;cload()" title="选择节点"><option value="">本地 (home-4c31g)</option></select>
+       <select class="sel" id="c-node" style="height:30px" onchange="CERT_NODE=this.value;cload()" title="选择节点"><option value="">本地 ({{ LOCAL_HOST }})</option></select>
        <a class="btn ghost" onclick="document.getElementById('csearch').value='';cload()">重置</a>
       </div>
       <table class="tbl"><thead><tr>
@@ -12169,7 +12225,7 @@ Filesystem      Size  Used Avail Use% Mounted on
        <div class="el-form-item">
         <div class="el-form-item__label">面板端口</div>
         <div class="el-form-item__content">
-         <input class="ipt" id="cfg-port" style="width:180px" placeholder="8890">
+         <input class="ipt" id="cfg-port" style="width:180px" placeholder="{{ PORT }}">
          <button class="btn white" onclick="cfgSecSave('port','cfg-port',true)">保存</button>
          <span class="input-help">修改后需重启面板服务才会生效。</span>
         </div>
@@ -12274,7 +12330,7 @@ Filesystem      Size  Used Avail Use% Mounted on
       <div class="head"><h2>许可证</h2></div>
       <div class="body cfg-form">
        <div class="el-form-item"><div class="el-form-item__label">当前版本</div>
-        <div class="el-form-item__content"><span class="el-tag el-tag--info">社区版 v2.4.2</span><span class="input-help">当前为社区版，企业版功能（AI 网关企业能力、多机高可用等）需导入许可证后启用。</span></div></div>
+        <div class="el-form-item__content"><span class="el-tag el-tag--info">社区版 {{ PANEL_VERSION }}</span><span class="input-help">当前为社区版，企业版功能（AI 网关企业能力、多机高可用等）需导入许可证后启用。</span></div></div>
        <div class="el-form-item"><div class="el-form-item__label">许可证状态</div>
         <div class="el-form-item__content"><span id="cfg-lic-state" style="color:var(--text2)">未导入</span></div></div>
        <div class="el-form-item"><div class="el-form-item__label">导入许可证</div>
@@ -12716,7 +12772,7 @@ Filesystem      Size  Used Avail Use% Mounted on
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
         <a class="btn link" title="根目录" onclick="syRoot()">🏠</a>
-        <input class="ipt" id="sy-l-path" style="flex:1;min-width:0" value="/home/yy" onchange="syRenderLeft(1)">
+        <input class="ipt" id="sy-l-path" style="flex:1;min-width:0" value="{{ BASE_DIR }}" onchange="syRenderLeft(1)">
       </div>
       <table class="tbl"><thead><tr><th>名称</th><th style="width:100px">操作</th></tr></thead><tbody id="sy-l-tb"></tbody></table>
       <div class="pager"><span class="total" id="sy-l-total">共 0 条</span><span class="pg cur">1</span></div>
@@ -13116,12 +13172,17 @@ Filesystem      Size  Used Avail Use% Mounted on
   </div>
  </div>
 
-<div class="footer app-footer"><div class="footer-content"><div class="footer-copyright">fleet-panel · 多机运维面板 · v2.4.2</div></div></div>
+<div class="footer app-footer"><div class="footer-content"><div class="footer-copyright">fleet-panel · 多机运维面板 · {{ PANEL_VERSION }}</div></div></div>
  </div>
 </div><script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
 <script>
 const TOK='{{ SESSION_TOKEN }}';
+const PANEL_VERSION='{{ PANEL_VERSION }}';
+const LOCAL_HOST='{{ LOCAL_HOST }}';
+const NODE_DOMAIN_SUFFIX='{{ NODE_DOMAIN_SUFFIX }}';
+const PANEL_DOMAIN='{{ PANEL_DOMAIN }}';
+const BASE_DIR='{{ BASE_DIR }}';
 const __of=window.fetch;window.fetch=function(u,o){o=o||{};o.headers=o.headers||{};o.headers['X-Fleet-Token']=o.headers['X-Fleet-Token']||TOK;if(window.__fsess){o.headers['Authorization']='Bearer '+window.__fsess;}return __of(u,o);};
 const F={load1:2,mem:85,disk:85,lat:300};
 const TITLES={overview:'概览',docker:'容器',sites:'网站',store:'应用商店',term:'终端',files:'文件',db:'数据库',jobs:'计划任务',certs:'证书',cfg:'设置',nodes:'多机管理',agent:'智能体',models:'模型',mcp:'MCP',gpu:'GPU 监控',tpl:'模板',env:'运行环境',mon:'监控',firewall:'防火墙',proc:'进程管理',ssh:'SSH 管理',disk:'磁盘管理',app:'APP',waf:'WAF',wmon:'网站监控',sync:'资源同步',kvm:'虚拟机管理',tamper:'网站防篡改',ha:'应用高可用',uiset:'界面设置',audit:'日志审计',toolbox:'工具箱',aigw:'AI 网关',skills:'Skills Hub',bench:'基准测试',users:'用户管理',report:'运维报表'};
@@ -13142,7 +13203,7 @@ function show(v){
  if(v==='store')storeTab('全部'); if(v==='nodes')nodesload(); if(v==='docker'){const act=document.querySelector('#ck-tabs .router_card_button.is-active');
   const i=[...document.querySelectorAll('#ck-tabs .router_card_button')].indexOf(act);
   ckTab(CK_TABS[i<0?1:i]);}
- if(v==='term'){termInit();} if(v==='certs')cload(); if(v==='agentstore')agTab(AG_CUR); if(v==='db')dbTabSet('mysql'); if(v==='files')fload(curDir||'/home/yy'); if(v==='proc')pload(); if(v==='disk')dikload(); if(v==='ssh')sshload(); if(v==='firewall')fwload(); if(v==='audit')auditload(); if(v==='toolbox')toolboxload(); if(v==='mon')monload(); if(v==='hostlog')hostlogTab(HL_TAB); if(v==='overview')ovload(); if(v==='models'||v==='mcp'||v==='tpl'||v==='env'||v==='sync')colLoad(v); if(v==='waf')wafload(); if(v==='tamper')tamperload(); if(v==='gpu')gpuload(); if(v==='kvm')kvmload(); if(v==='ha')haload(); if(v==='wmon')wmonload(); if(v==='uiset')uisetload(); if(v==='aigw')aigwTab(document.querySelector('#aigw .el-radio-button.is-active .el-radio-button__inner').textContent.trim()); if(v==='skills')skillsload(); if(v==='bench')benchload(); if(v==='users')usersload(); if(v==='report')reportload(); if(v==='app')appLoad(); if(v==='cfg'){cfgLoad();cfgTab('面板');}}
+ if(v==='term'){termInit();} if(v==='certs')cload(); if(v==='agentstore')agTab(AG_CUR); if(v==='db')dbTabSet('mysql'); if(v==='files')fload(curDir||'{{ BASE_DIR }}'); if(v==='proc')pload(); if(v==='disk')dikload(); if(v==='ssh')sshload(); if(v==='firewall')fwload(); if(v==='audit')auditload(); if(v==='toolbox')toolboxload(); if(v==='mon')monload(); if(v==='hostlog')hostlogTab(HL_TAB); if(v==='overview')ovload(); if(v==='models'||v==='mcp'||v==='tpl'||v==='env'||v==='sync')colLoad(v); if(v==='waf')wafload(); if(v==='tamper')tamperload(); if(v==='gpu')gpuload(); if(v==='kvm')kvmload(); if(v==='ha')haload(); if(v==='wmon')wmonload(); if(v==='uiset')uisetload(); if(v==='aigw')aigwTab(document.querySelector('#aigw .el-radio-button.is-active .el-radio-button__inner').textContent.trim()); if(v==='skills')skillsload(); if(v==='bench')benchload(); if(v==='users')usersload(); if(v==='report')reportload(); if(v==='app')appLoad(); if(v==='cfg'){cfgLoad();cfgTab('面板');}}
 var TB={tab:'快速设置',ui:null,cats:null,busy:false};
 function tbEsc(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function tbPost(key,value){
@@ -17631,7 +17692,7 @@ function termConnectionMenu(e){
  setTimeout(()=>document.addEventListener('mousedown',function h(ev){if(!m.contains(ev.target)){m.remove();document.removeEventListener('mousedown',h);}}),0);
 }
 // ---- 文件 ----
-let fstack=['/home/yy'], curDir='/home/yy', FILES=[], FSEL={}, FPARENT='/home/yy';
+let fstack=['{{ BASE_DIR }}'], curDir='{{ BASE_DIR }}', FILES=[], FSEL={}, FPARENT='{{ BASE_DIR }}';
 let curDbTab='mysql';
 function fesc(t){return escHtml(String(t==null?'':t));}
 function fj(p){return JSON.stringify(String(p)).replace(/&/g,'&amp;').replace(/"/g,'&quot;');}
@@ -17709,7 +17770,7 @@ async function fsaveEdit(path){
  const d=await (await fetch('/api/fs/write',{method:'POST',headers:{'Content-Type':'application/json','X-Fleet-Token':TOK},body:JSON.stringify({path:path,content:t.value})})).json();
  if(d.ok){fpToast('保存成功');fpClose();fload(curDir,1);}else fpToast('保存失败: '+(d.error||''),'error');
 }
-function fup(){fload(window.FPARENT||'/home/yy',1);}
+function fup(){fload(window.FPARENT||'{{ BASE_DIR }}',1);}
 async function fopen(p){fload(p,1);}
 async function fread(p){fedit(p);}
 /* ---- 右键 / 更多 菜单 ---- */
@@ -18422,7 +18483,7 @@ function cfgLoad(){
   document.getElementById('cfg-proxy').value=s.proxy||'';
   document.getElementById('cfg-lang').value=s.lang||'中文(简体)';
   document.getElementById('cfg-region-txt').textContent=s.region||'跟随运行区域（默认）';
-  document.getElementById('cfg-port').value=s.port||8890;
+  document.getElementById('cfg-port').value=s.port||{{ PORT }};
   document.getElementById('cfg-entrance').value=s.entrance||'';
   document.getElementById('cfg-sess').value=s.sessionTimeout||86400;
   document.getElementById('cfg-allowip').value=s.allowIPs||'';
@@ -18910,7 +18971,7 @@ async function ndload(){
    return `<tr>
     <td><b>${h.name}</b> <span class="mb8">${h.ip||''}</span></td>
     <td><span class="sev sev-${sevcls}">${st}</span></td>
-    <td class="mb8">v2.4.2</td>
+    <td class="mb8">${PANEL_VERSION}</td>
     <td><span>CPU 负载 <b>${cpu}</b></span><span class="mb8" style="margin-left:10px">| 内存 <b>${h.mem==null?'-':h.mem+'%'}</b></span><span class="mb8" style="margin-left:10px">| 磁盘 <b>${h.disk==null?'-':h.disk+'%'}</b></span></td>
     <td><a class="btn link" onclick="hTerm('${(h.name||'').replace(/'/g,'')}')">终端</a> <a class="btn link" onclick="hLogs('${(h.name||'').replace(/'/g,'')}')">日志</a> <a class="btn link" onclick="aiFix('${(h.name||'').replace(/'/g,'')}')">AI 修复</a> <a class="btn link" onclick="hReboot('${(h.name||'').replace(/'/g,'')}')">重启</a></td>
    </tr>`;});
@@ -19009,7 +19070,7 @@ async function ndNodesLoad(){
  let hosts=[];try{hosts=(await (await fetch('/api/hosts')).json())||[];}catch(e){}
  tb.innerHTML=hosts.map(h=>`<tr><td><b>${h.name}</b></td><td class="mb8">${h.ip||'-'}</td><td class="mb8">${h.local?'主节点':'节点'}</td>
   <td><span class="sev sev-${h.sev||'ok'}">${h.sev==='ok'?'正常':h.sev==='warn'?'警告':'异常'}</span></td>
-  <td class="mb8">v2.4.2</td>
+  <td class="mb8">${PANEL_VERSION}</td>
   <td><a class="btn link" onclick="hTerm('${h.name}')">终端</a> <a class="btn link" onclick="hLogs('${h.name}')">日志</a> <a class="btn link" onclick="hReboot('${h.name}')">重启</a></td></tr>`).join('')
   ||'<tr><td colspan=6 class="empty">暂无数据</td></tr>';
  const tot=document.getElementById('nd-node-total');if(tot)tot.textContent='共 '+hosts.length+' 条';
@@ -19029,7 +19090,7 @@ function ndNodeGen(){ndNodeAdd();}
 async function ndPanelsLoad(){
  const tb=document.getElementById('nd-panel-tb');if(!tb)return;
  let ov={};try{ov=await (await fetch('/api/overview')).json();}catch(e){}
- tb.innerHTML=`<tr><td><b>${ov.ip||location.host}</b></td><td class="mb8">主节点面板</td><td class="mb8">v2.4.2</td>
+ tb.innerHTML=`<tr><td><b>${ov.ip||location.host}</b></td><td class="mb8">主节点面板</td><td class="mb8">${PANEL_VERSION}</td>
   <td><span class="sev sev-ok">正常</span></td>
   <td><a class="btn link" onclick="show('cfg')">设置</a></td></tr>`;
  const tot=document.getElementById('nd-panel-total');if(tot)tot.textContent='共 1 条';
@@ -19608,16 +19669,16 @@ function syTab(t){SY_TAB=t;
 async function syLoadNodes(){
  const d=await fetch('/api/sync/nodes').then(r=>r.json()).catch(()=>({}));
  const ns=(d.nodes||[]).map(n=>n.name+' ('+n.ip+')');
- if(!ns.length)ns.push('home-4c31g (home-4c31g.myagentlab.internal)');
+ if(!ns.length)ns.push('{{ LOCAL_HOST }} ({{ LOCAL_HOST }}.{{ NODE_DOMAIN_SUFFIX }})')
  ['sy-l-node','sy-r-node'].forEach(id=>{const el=document.getElementById(id);if(!el)return;
   const cur=el.value;el.innerHTML='<option value="">选择节点</option>'+ns.map(n=>`<option>${n}</option>`).join('');
   if(cur)el.value=cur;});
 }
 function syNodeVal(id){const el=document.getElementById(id);if(!el||!el.value)return '';
  return el.value.replace(/\s*\(.*\)$/,'').trim();}
-function syRoot(){const p=document.getElementById('sy-l-path');if(p)p.value='/home/yy';syRenderLeft(1);}
+function syRoot(){const p=document.getElementById('sy-l-path');if(p)p.value='{{ BASE_DIR }}';syRenderLeft(1);}
 async function syRenderLeft(force){
- const node=syNodeVal('sy-l-node'), p=(document.getElementById('sy-l-path')||{}).value||'/home/yy';
+ const node=syNodeVal('sy-l-node'), p=(document.getElementById('sy-l-path')||{}).value||'{{ BASE_DIR }}';
  const q=((document.getElementById('sy-l-search')||{}).value||'').toLowerCase();
  const tb=document.getElementById('sy-l-tb'); if(!tb)return;
  tb.innerHTML='<tr><td colspan="2" class="empty">加载中…</td></tr>';
@@ -19634,9 +19695,9 @@ async function syRenderLeft(force){
    :'<tr><td colspan="2" class="empty">暂无数据</td></tr>';
  const t=document.getElementById('sy-l-total');if(t)t.textContent='共 '+ents.length+' 条';
  window._SY_SRC=(d.path||p);}
-function syEnter(n){const p=(document.getElementById('sy-l-path')||{}).value||'/home/yy';
+function syEnter(n){const p=(document.getElementById('sy-l-path')||{}).value||'{{ BASE_DIR }}';
  const np=(p.replace(/\/$/,'')+'/'+n);const pi=document.getElementById('sy-l-path');if(pi)pi.value=np;syRenderLeft(1);}
-function syPick(n){const p=(document.getElementById('sy-l-path')||{}).value||'/home/yy';
+function syPick(n){const p=(document.getElementById('sy-l-path')||{}).value||'{{ BASE_DIR }}';
  const full=p.replace(/\/$/,'')+'/'+n;fpToast('已选择源: '+full);window._SY_PICK=full;}
 async function syRender(){
  const q=((document.getElementById('sy-r-search')||{}).value||'').toLowerCase();
@@ -21262,14 +21323,14 @@ async function lpLogin(){const u=document.getElementById('lp-user').value.trim()
   else ok.textContent=d.error||'登录失败';}catch(e){ok.textContent='网络错误';}}
 function __safe(fn){try{return fn();}catch(e){try{console.error('[fleet]',e);}catch(_){}}}
 function init(){Promise.resolve(__bootstrap()).catch(function(){});
- __safe(function(){load();ovload();dload();sload();aload();cload();uload();jload();bload();dbload();fload('/home/yy');agentinit();uisetload();});
+ __safe(function(){load();ovload();dload();sload();aload();cload();uload();jload();bload();dbload();fload('{{ BASE_DIR }}');agentinit();uisetload();});
  setInterval(function(){__safe(load);},5000);setInterval(function(){__safe(ovload);},8000);setInterval(function(){__safe(dload);},8000);setInterval(function(){__safe(sload);},8000);setInterval(function(){__safe(dbload);},8000);
  __safe(function(){show('overview');});}
 if(document.readyState!=='loading')init();else document.addEventListener('DOMContentLoaded',init);
 </script></body></html>"""
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(); ap.add_argument("--port", type=int, default=8890)
+    ap = argparse.ArgumentParser(); ap.add_argument("--port", type=int, default=SITE["port"])
     a = ap.parse_args()
     _job_worker()   # 启动计划任务后台调度
     app = make_app()
