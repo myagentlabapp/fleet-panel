@@ -2921,7 +2921,7 @@ _AI_DEFAULT = {
     "cooldown_sec": 1800,      # 同一节点两次自动派发的最小间隔
     "default_cli": "claude",
     "timeout": 300,
-    "hosts": {},               # {"节点名": {"cli": "claude", "workdir": "/home/yy", "timeout": 300, "model": "x"}}
+    "hosts": {},               # {"节点名": {"cli": "claude", "workdir": "/opt/xxx", "timeout": 300, "model": "x"}}
     "models": {},              # {"cli名": "模型名", ...} 全局默认 per-cli; 节点级覆盖在 hosts[node].model
     "skills": {                # 异常类型关键字 -> 排查 skill 提示片段(注入给节点的 agent)
       "disk":    "【磁盘排查】用 df -h / du -sh 定位大目录; 查 /var/log 与 journalctl 日志膨胀; inode: df -i; 列出可安全清理项(旧日志/tmp/容器孤儿层), 未确认前勿删。",
@@ -2967,7 +2967,8 @@ def _ai_save(cfg):
 
 def ai_host_conf(cfg, host):
     """取某节点的 CLI 配置, 缺省回落全局 default_cli。model 单独从 hosts 覆盖或全局 models 取。
-    workdir 留空 = 运行到节点该用户自己的 $HOME(各节点用户/路径不同, 不能写死)。"""
+    workdir 留空 = 落到面板约定逐次工作区 $HOME/.fleet-agent/work/run-<id>(见 _run_ai)。
+    显式填了才用该绝对路径(建议留空, 统一归档才好统计)。"""
     h = dict(cfg.get("hosts", {}).get(host) or {})
     h.setdefault("cli", cfg.get("default_cli") or "claude")
     h.setdefault("workdir", "")
@@ -11326,8 +11327,9 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
        <button class="btn" onclick="aiCfgSave()">保存全局设置</button>
        <button class="btn ghost" onclick="aiOpenSkills()">编辑排查手册</button>
       </div>
-      <table class="tbl"><thead><tr><th>节点</th><th>已装 CLI（实测）</th><th>使用 CLI</th><th>工作目录</th><th>超时(s)</th><th>模型名</th><th>操作</th></tr></thead>
+      <table class="tbl"><thead><tr><th>节点</th><th>已装 CLI（实测）</th><th>使用 CLI</th><th>工作目录<small style="font-weight:400;color:var(--text2)"> 留空=自动</small></th><th>超时(s)</th><th>模型名</th><th>操作</th></tr></thead>
        <tbody id=ai-node-tb></tbody></table>
+      <div class="input-help" style="margin-top:8px">工作目录留空 = 自动落到该节点 <code>~/.fleet-agent/work/run-&lt;记录ID&gt;</code>，与「修复记录」里的每条记录一一对应，产物集中便于回收统计（推荐留空）。填了绝对路径则沿用该目录。</div>
       <div class="pager"><span class="ph" id=ai-node-total>共 0 条</span></div>
      </div>
     </div>
@@ -18475,7 +18477,7 @@ async function aiNodeLoad(){
    <td><b>${h}</b></td>
    <td class="mb8">${probed}</td>
    <td><input class="ipt" id="ain-cli-${h}" style="width:110px" value="${cli}"></td>
-   <td><input class="ipt" id="ain-wd-${h}" style="width:150px" value="${wd}" placeholder="留空=节点 HOME"></td>
+   <td><input class="ipt" id="ain-wd-${h}" style="width:150px" value="${wd}" placeholder="留空=自动工作区" title="留空: 自动落到该节点 ~/.fleet-agent/work/run-&lt;记录ID&gt;（推荐）&#10;填写: 用该绝对路径（如 /opt/xxx）作为 claude 工作目录"></td>
    <td><input class="ipt" id="ain-to-${h}" style="width:80px" value="${to}"></td>
    <td><input class="ipt" id="ain-model-${h}" style="width:120px" value="${model}" placeholder="留空=全局"></td>
    <td><a class="btn link" onclick="aiNodeProbe('${h}')">探测</a> <a class="btn link" onclick="aiNodeSave('${h}')">保存</a> <a class="btn link" onclick="aiNodeClear('${h}')">清除</a></td>
