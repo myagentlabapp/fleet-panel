@@ -2914,9 +2914,17 @@ _AI_DEFAULT = {
     "cooldown_sec": 1800,      # 同一节点两次自动派发的最小间隔
     "default_cli": "claude",
     "timeout": 300,
-    "hosts": {},               # {"节点名": {"cli": "claude", "workdir": "/home/yy", "timeout": 300}}
-    "custom_clis": {           # 非交互调用模板, {prompt} 会被替换
-        "claude": "claude -p {prompt} --permission-mode bypassPermissions",
+    "hosts": {},               # {"节点名": {"cli": "claude", "workdir": "/home/yy", "timeout": 300, "model": "x"}}
+    "models": {},              # {"cli名": "模型名", ...} 全局默认 per-cli; 节点级覆盖在 hosts[node].model
+    "skills": {                # 异常类型关键字 -> 排查 skill 提示片段(注入给节点的 agent)
+      "disk":    "【磁盘排查】用 df -h / du -sh 定位大目录; 查 /var/log 与 journalctl 日志膨胀; inode: df -i; 列出可安全清理项(旧日志/tmp/容器孤儿层), 未确认前勿删。",
+      "mem":     "【内存排查】free -h 看 buff/cache 与真实占用; top/ps --sort=-%mem 找 Top 进程; 查 OOM: dmesg | grep -i oom 或 journalctl -k; 判定是泄漏还是缓存, 给最小处置建议。",
+      "load":    "【负载排查】uptime 看 load; top 看 CPU 排队; 区分 CPU 高 / IO 阻塞 / 进程疯长; ps aux --sort=-%cpu; 必要时查是否有失控进程或容器。",
+      "latency": "【延迟/网络排查】ping 目的与丢包率; 看网卡流量 speed: ethtool 或 /proc/net/dev; 查带宽占用进程; 判断是链路自身(香港线丢包)还是流量冲击。",
+      "default": "【通用兜底】先只读诊断拿到根因, 排障链路: 看日志(含 journalctl)→查进程→查资源→(fix 模式才)最小改动; 严禁重启整机、严禁删除数据。",
+    },
+    "custom_clis": {           # 非交互调用模板, {prompt} 会被替换; {model} 可选(填了才加 --model)
+        "claude": "claude -p {prompt} --model {model}",
         "codex": "codex exec {prompt}",
         "opencode": "opencode run {prompt}",
     },
@@ -2934,7 +2942,7 @@ def _ai_cfg():
     if not isinstance(d, dict): d = {}
     out = json.loads(json.dumps(_AI_DEFAULT))
     out.update({k: v for k, v in d.items() if v is not None})
-    for k in ("hosts", "custom_clis"):
+    for k in ("hosts", "custom_clis", "models", "skills"):
         if not isinstance(out.get(k), dict):
             out[k] = dict(_AI_DEFAULT[k])
         else:
@@ -2951,11 +2959,13 @@ def _ai_save(cfg):
 
 
 def ai_host_conf(cfg, host):
-    """取某节点的 CLI 配置, 缺省回落全局 default_cli。"""
+    """取某节点的 CLI 配置, 缺省回落全局 default_cli。model 单独从 hosts 覆盖或全局 models 取。"""
     h = dict(cfg.get("hosts", {}).get(host) or {})
     h.setdefault("cli", cfg.get("default_cli") or "claude")
-    h.setdefault("workdir", "/home/yy")
+    h.setdefault("workdir", "/root")
     h.setdefault("timeout", cfg.get("timeout") or 300)
+    if not h.get("model"):
+        h["model"] = (cfg.get("models") or {}).get(h.get("cli")) or ""
     return h
 
 
@@ -2979,8 +2989,10 @@ def _recent_events(host, n=8):
     return [f"{time.strftime('%H:%M', time.localtime(t))} [{lv}] {m}" for t, lv, m in rows]
 
 
-def build_task(host, reason, mode):
-    """拼给 AI 的自然语言任务。约束内建: 不重启整机、不删数据、先低风险。"""
+def build_task(host, reason, mode, cfg=None):
+    """拼给 AI 的自然语言任务。约束内建: 不重启整机、不删数据、先低风险。
+    按 reason 里的异常关键字命中 skills 排查手册并注入, 让 agent 照着专业 SOP 排障。"""
+    cfg = cfg or _ai_cfg()
     ev = _recent_events(host)
     lines = [
         f"你是负责服务器 {host} 的运维 agent。面板检测到该节点异常。",
@@ -2990,6 +3002,16 @@ def build_task(host, reason, mode):
         "近期事件:",
     ]
     lines += ["  - " + e for e in ev] if ev else ["  - (无)"]
+    # 按异常类型注入排查 skill
+    low = reason.lower()
+    sk = (cfg.get("skills") or {})
+    sis = {k: v for k, v in sk.items() if k != "default" and k in low}
+    if not sis and sk.get("default"):
+        sis = {"default": sk["default"]}
+    if sis:
+        lines += ["", "参考排查手册(按当前异常类型选择):"]
+        for k, v in sis.items():
+            lines += ["### [" + k + "]\n" + v]
     lines += ["", "要求:"]
     if mode == "fix":
         lines += ["1. 先诊断根因, 命令只读优先。",
@@ -3008,7 +3030,15 @@ def _run_ai(host, reason, mode, cfg):
     hc = ai_host_conf(cfg, host)
     cli_name = hc["cli"]
     tmpl = (cfg.get("custom_clis") or {}).get(cli_name) or "{prompt}"
-    prompt = build_task(host, reason, mode)
+    # 按节点/全局模型名, 把模板里可选的 {model} 替换成 --model X(不配/模板无占位则跳过)
+    model = (hc.get("model") or "").strip()
+    if model:
+        if "{model}" in tmpl:
+            tmpl = tmpl.replace("{model}", _shq(model))
+    else:
+        # 未配模型名: 去掉模板里可选的 --model {model}, 避免把字面 {model} 传进去
+        tmpl = tmpl.replace(" --model {model}", "").replace(" {model}", "")
+    prompt = build_task(host, reason, mode, cfg)
     # 模板里的 {prompt} 用 shell 单引号安全转义后替换
     call = tmpl.replace("{prompt}", _shq(prompt))
     full = f"cd {_shq(hc['workdir'])} && {call}"
@@ -4928,10 +4958,12 @@ def make_app():
         cur = _ai_cfg()
         for k in ("enabled", "mode", "cooldown_sec", "default_cli", "timeout"):
             if k in d: cur[k] = d[k]
-        for k in ("hosts", "custom_clis"):
-            if isinstance(d.get(k), dict):
+        for k in ("hosts", "custom_clis", "models", "skills"):
+            if d.get(k) is None:            # null = 整块回落到默认
+                cur[k] = dict(_AI_DEFAULT[k])
+            elif isinstance(d.get(k), dict):
                 for hk, hv in d[k].items():
-                    if hv is None:          # null = 删除该节点的覆盖配置
+                    if hv is None:          # 键为 null = 删除该覆盖项
                         cur[k].pop(hk, None)
                     else:
                         cur[k][hk] = hv
@@ -11273,9 +11305,11 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
        <span>模式</span><select id=aimode class="sel" style="width:180px"><option value="report">report（只诊断）</option><option value="fix">fix（允许修复）</option></select>
        <span>冷却(秒)</span><input id=aicd class="ipt" style="width:90px">
        <span>默认 CLI</span><input id=aicli class="ipt" style="width:110px" placeholder="claude">
+       <span>模型名</span><input id=aimodel class="ipt" style="width:130px" placeholder="留空=节点环境默认">
        <button class="btn" onclick="aiCfgSave()">保存全局设置</button>
+       <button class="btn ghost" onclick="aiOpenSkills()">编辑排查手册</button>
       </div>
-      <table class="tbl"><thead><tr><th>节点</th><th>已装 CLI（实测）</th><th>使用 CLI</th><th>工作目录</th><th>超时(s)</th><th>操作</th></tr></thead>
+      <table class="tbl"><thead><tr><th>节点</th><th>已装 CLI（实测）</th><th>使用 CLI</th><th>工作目录</th><th>超时(s)</th><th>模型名</th><th>操作</th></tr></thead>
        <tbody id=ai-node-tb></tbody></table>
       <div class="pager"><span class="ph" id=ai-node-total>共 0 条</span></div>
      </div>
@@ -18361,23 +18395,47 @@ async function aiCfgLoad(){
  const md=document.getElementById('aimode');if(md)md.value=c.mode||'report';
  const cd=document.getElementById('aicd');if(cd)cd.value=c.cooldown_sec||1800;
  const cl=document.getElementById('aicli');if(cl)cl.value=c.default_cli||'claude';
+ const am=document.getElementById('aimodel');if(am)am.value=(c.models||{})[cl.value]||'';
  return c;
 }
 async function aiCfgSave(){
+ const cli=document.getElementById('aicli').value.trim()||'claude';
  const body={enabled:document.getElementById('aien').checked,
   mode:document.getElementById('aimode').value,
   cooldown_sec:+document.getElementById('aicd').value||1800,
-  default_cli:document.getElementById('aicli').value.trim()||'claude'};
+  default_cli:cli,
+  models:{} };
+ const mv=document.getElementById('aimodel').value.trim();
+ if(mv)body.models[cli]=mv; else body.models=null;   // null=删除该 CLI 的模型覆盖
  const r=await fetch('/api/ai/config',{method:'POST',headers:chdr(),body:JSON.stringify(body)});
  const d=await r.json().catch(()=>({}));
  fpToast(d.ok?'AI 自愈配置已保存':('ERR '+(d.error||'')),d.ok?'success':'error');
  if(d.ok)aiNodeLoad();
 }
+/* 排查手册(异常类型 → skill)编辑抽屉 */
+async function aiOpenSkills(){
+ if(!(AI_NODE.cfg&&AI_NODE.cfg.skills)) await aiCfgLoad();
+ const sk=(AI_NODE.cfg&&AI_NODE.cfg.skills)||{};
+ const keys=['disk','mem','load','latency','default'];
+ const labs={disk:'磁盘',mem:'内存',load:'负载',latency:'延迟/网络',default:'通用兜底'};
+ const prefill=keys.map(k=>(sk[k]?k+'='+sk[k]:k+'=')).join('\n');
+ const r=prompt('编辑排查手册 — 每行「类型=排查步骤」, 类型∈ '+keys.join('/')+'\n\n'+prefill, prefill);
+ if(r===null)return;
+ const body={skills:{}}; var n=0;
+ r.split('\n').forEach(ln=>{ln=ln.trim(); if(!ln)return; const i=ln.indexOf('='); if(i<=0)return;
+  const k=ln.slice(0,i).trim(); const v=ln.slice(i+1).trim();
+  if(keys.includes(k)&&v){body.skills[k]=v;n++;}});
+ if(!n)return fpToast('没有可保存的条目','error');
+ fetch('/api/ai/config',{method:'POST',headers:chdr(),body:JSON.stringify(body)}).then(r=>r.json()).then(d=>{
+  fpToast(d.ok?('已保存 '+n+' 段排查手册'):('ERR '+(d.error||'')),d.ok?'success':'error');
+  if(d.ok)aiCfgLoad();
+ });
+}
 /* 节点 × CLI 资产表 */
 const AI_NODE={hosts:[],cfg:{},probe:{}};
 async function aiNodeLoad(){
  const tb=document.getElementById('ai-node-tb');if(!tb)return;
- tb.innerHTML='<tr><td colspan=6 class="empty">读取中…</td></tr>';
+ tb.innerHTML='<tr><td colspan=7 class="empty">读取中…</td></tr>';
  const c=await aiCfgLoad();
  AI_NODE.cfg=c||{};
  let hs=[];try{hs=await (await fetch('/api/hosts')).json();}catch(e){hs=[];}
@@ -18392,6 +18450,7 @@ async function aiNodeLoad(){
   const cli=cfg.cli||defCli;
   const wd=cfg.workdir||'/home/yy';
   const to=cfg.timeout||AI_NODE.cfg.timeout||300;
+  const model=cfg.model||(AI_NODE.cfg.models||{})[cli]||'';
   const pb=AI_NODE.probe[h];
   const probed=pb?(pb.ok?((pb.found||[]).join(', ')||'<span class="mb8">（未装任何 agent CLI）</span>'):('<span class="sev sev-crit">不可达</span>')):'<span class="mb8">未探测</span>';
   return `<tr>
@@ -18400,8 +18459,9 @@ async function aiNodeLoad(){
    <td><input class="ipt" id="ain-cli-${h}" style="width:110px" value="${cli}"></td>
    <td><input class="ipt" id="ain-wd-${h}" style="width:150px" value="${wd}"></td>
    <td><input class="ipt" id="ain-to-${h}" style="width:80px" value="${to}"></td>
+   <td><input class="ipt" id="ain-model-${h}" style="width:120px" value="${model}" placeholder="留空=全局"></td>
    <td><a class="btn link" onclick="aiNodeProbe('${h}')">探测</a> <a class="btn link" onclick="aiNodeSave('${h}')">保存</a> <a class="btn link" onclick="aiNodeClear('${h}')">清除</a></td>
-  </tr>`;}).join(''):'<tr><td colspan=6 class="empty">暂无节点</td></tr>';
+  </tr>`;}).join(''):'<tr><td colspan=7 class="empty">暂无节点</td></tr>';
  const tot=document.getElementById('ai-node-total');if(tot)tot.textContent='共 '+names.length+' 条';
 }
 async function aiNodeProbe(h){
@@ -18423,7 +18483,9 @@ async function aiProbeAll(){
 async function aiNodeSave(h){
  const g=id=>{const e=document.getElementById(id);return e?e.value.trim():'';};
  const body={hosts:{}};
+ const mv=g('ain-model-'+h);
  body.hosts[h]={cli:g('ain-cli-'+h)||'claude',workdir:g('ain-wd-'+h)||'/home/yy',timeout:+g('ain-to-'+h)||300};
+ if(mv)body.hosts[h].model=mv;
  const r=await fetch('/api/ai/config',{method:'POST',headers:chdr(),body:JSON.stringify(body)});
  const d=await r.json().catch(()=>({}));
  fpToast(d.ok?('已保存 '+h+' 的配置'):('ERR '+(d.error||'')),d.ok?'success':'error');
