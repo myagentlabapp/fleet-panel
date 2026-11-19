@@ -2948,6 +2948,15 @@ def db():
                 c.execute("ALTER TABLE hosts ADD COLUMN facts TEXT")
         except Exception:
             pass
+        # 幂等迁移: cmds 增加 ref / timeout —— AI 自愈任务走 agent 通道时带 ai_fixes.id 与超时
+        try:
+            _ccols = [r[1] for r in c.execute("PRAGMA table_info(cmds)")]
+            if "ref" not in _ccols:
+                c.execute("ALTER TABLE cmds ADD COLUMN ref INTEGER")
+            if "timeout" not in _ccols:
+                c.execute("ALTER TABLE cmds ADD COLUMN timeout INTEGER")
+        except Exception:
+            pass
         _conn.c = c
     return _conn.c
 
@@ -3233,6 +3242,63 @@ def _ai_run_ssh(host, cmd, timeout=120, clean_env=None):
         return {"ok": True, "done": False, "msg": f"ERR {e}"}
 
 
+def _ai_agent_fresh(host):
+    """该节点的 fleet-agent 是否还在正常上报(默认 180s 内)。决定 AI 任务走 agent 还是 SSH 兜底。
+    面板本机不算 —— 它没有(也不需要) fleet-agent 单元, 直接本地执行。"""
+    if _ai_is_local(host):
+        return False
+    try:
+        row = db().execute("SELECT at FROM hosts WHERE name=?", (host,)).fetchone()
+    except Exception:
+        return False
+    if not row or not row[0]:
+        return False
+    return (int(time.time()) - int(row[0])) <= NODE_AGENT_STALE
+
+
+def _ai_is_local(host):
+    """host 是否就是面板所在的这台机器。"""
+    h = str(host or "").strip()
+    return h in ("", "this", "local", socket.gethostname(), node_domain(socket.gethostname()))
+
+
+def _ai_dispatch_via_agent(host, cmd, timeout, ref=None, poll_sec=3):
+    """把 AI 任务塞进 agent 已在用的指令通道: 插 cmds(proc=ai-report) -> agent 轮询取走 ->
+    在节点本地跑 -> POST /result 回写。面板这边只是等, 全程不开 SSH。
+
+    链路抖动时 agent 会自己重连重试(下一轮 30s 轮询), 已取走的任务在节点本地跑完照常回传,
+    所以比面板侧 SSH 更能扛网络问题。
+
+    返回 (ok, out, extra)。"""
+    c = db()
+    cur = c.execute("INSERT INTO cmds(host,proc,cmd,status,issued_at,timeout,ref) "
+                    "VALUES(?,?,?, 'pending', ?, ?, ?)",
+                    (host, "ai-report", cmd, int(time.time()), int(timeout), ref))
+    c.commit()
+    cid = cur.lastrowid
+    # 等 agent 取走(最多 30s 一轮) + 跑完(timeout) + 回写余量
+    deadline = time.time() + 45 + int(timeout)
+    while time.time() < deadline:
+        time.sleep(poll_sec)
+        try:
+            row = c.execute("SELECT status,result FROM cmds WHERE id=?", (cid,)).fetchone()
+        except Exception:
+            continue
+        if not row:
+            return False, "任务行丢失", {}
+        st, res = row
+        if st in ("done", "failed"):
+            return st == "done", (res or ""), {"cmd_id": cid}
+    # 超时: 标记失败, 不再等
+    try:
+        c.execute("UPDATE cmds SET status='failed', result=?, done_at=? WHERE id=? AND status<>'done'",
+                  (f"面板等待超时({int(timeout)}s+)", int(time.time()), cid))
+        c.commit()
+    except Exception:
+        pass
+    return False, f"agent 通道等待超时({int(timeout)}s+)", {"cmd_id": cid}
+
+
 def _run_ai(host, reason, mode, cfg):
     """同步执行一次 agent 调用, 把结果写库并推送。返回记录 dict。
 
@@ -3260,9 +3326,14 @@ def _run_ai(host, reason, mode, cfg):
     call = tmpl.replace("{prompt}", _shq(prompt))
 
     # claude 专属的收紧参数: 只对基于 claude 的 CLI 生效, 其它 CLI 不认识这些 flag
+    # 注意: bypassPermissions 在 root 下会被 claude 拒绝, 所以用 dontAsk ——
+    # 非交互场景下一律不弹权限询问(需要的工具已由 --tools 白名单给出)
     if "claude" in cli_name.lower():
-        call += (" --strict-mcp-config --permission-mode bypassPermissions"
-                 " --max-turns 8 --tools 'Bash,Read,Grep'")
+        # --tools 限定可用工具集; --allowedTools 预授权同一组工具, 否则 dontAsk 模式下
+        # 每次工具调用都会被直接拒绝(实测: 只有 --tools 时 agent 只能拿到零散信息)
+        call += (" --strict-mcp-config --permission-mode dontAsk"
+                 " --max-turns 20"
+                 " --tools 'Bash,Read,Grep' --allowedTools 'Bash,Read,Grep'")
 
     c = db()
     cur = c.execute("INSERT INTO ai_fixes(host,reason,cli,mode,status,started_at) VALUES(?,?,?,?,?,?)",
@@ -3282,17 +3353,24 @@ def _run_ai(host, reason, mode, cfg):
     timeout = int(hc.get("timeout") or 120)
     log_event(host, "info", f"AI {mode} 开始: {cli_name} #{fid} @ {rec_wd}")
     t0 = time.time()
-    r = _ai_run_ssh(host, full, timeout=timeout)
-    elapsed = round(time.time() - t0, 1)
-    if r.get("done"):
-        out = str(r.get("out", ""))
-        status = "done" if r.get("rc", 0) == 0 else "failed"
+    # 优先走 agent 通道(节点本地执行, 不依赖 SSH 链路); agent 掉线时才 SSH 兜底
+    src = "agent" if _ai_agent_fresh(host) else "ssh"
+    if src == "agent":
+        ok, out, extra = _ai_dispatch_via_agent(host, full, timeout, ref=fid)
+        rc = 0 if ok else 1
     else:
-        out = str(r.get("msg") or "SSH 通道不可达")
-        status = "failed"
+        r = _ai_run_ssh(host, full, timeout=timeout)
+        extra = {}
+        rc = r.get("rc")
+        if r.get("done"):
+            ok, out = (r.get("rc", 0) == 0), str(r.get("out", ""))
+        else:
+            ok, out = False, str(r.get("msg") or "SSH 通道不可达")
+    elapsed = round(time.time() - t0, 1)
+    status = "done" if ok else "failed"
     out = out[-8000:]
-    # 头部带上实测上下文, 方便下次一眼看出是超时、权限还是模型问题
-    out = f"[rc={r.get('rc')} elapsed={elapsed}s timeout={timeout}s]\n" + out
+    # 头部带上实测上下文, 方便下次一眼看出走的是哪条通道、耗时多少
+    out = f"[source={src} rc={rc} elapsed={elapsed}s timeout={timeout}s]\n" + out
     c.execute("UPDATE ai_fixes SET status=?, done_at=?, output=?, workdir=? WHERE id=?",
               (status, int(time.time()), out, rec_wd, fid))
     c.commit()
@@ -5236,33 +5314,66 @@ def make_app():
             return jsonify({"error":"bad secret"}), 401
         proc = d.get("proc", "")
         cmd = d.get("cmd", "")
-        if proc not in ("docker-restart", "service-restart"):
+        if proc not in ("docker-restart", "service-restart", "ai-report"):
             return jsonify({"error":"unknown proc"}), 400
+        # ai-report 会在节点本地跑一条 shell; 要求 && 链里至少有一段以白名单 CLI 开头,
+        # 防止该通道被当成任意 shell(mkdir/cd 这类准备动作允许)
+        if proc == "ai-report":
+            _clis = ("claude", "codex", "opencode", "gemini", "qwen", "aider")
+            _ok = False
+            for _seg in str(cmd or "").split("&&"):
+                _seg = _seg.strip()
+                if not _seg:
+                    continue
+                if os.path.basename(_seg.split()[0]) in _clis:
+                    _ok = True
+                    break
+            if not _ok:
+                return jsonify({"error": "ai-report cmd must contain a known CLI segment"}), 400
+        _to = d.get("timeout")
+        try:
+            _to = int(_to) if _to is not None else None
+        except Exception:
+            _to = None
+        _ref = d.get("ref")
+        try:
+            _ref = int(_ref) if _ref is not None else None
+        except Exception:
+            _ref = None
         c = db()
-        cur = c.execute("INSERT INTO cmds(host,proc,cmd,status,issued_at) VALUES(?,?,?, 'pending', ?)",
-                        (host, proc, cmd, int(time.time())))
+        cur = c.execute("INSERT INTO cmds(host,proc,cmd,status,issued_at,timeout,ref) "
+                        "VALUES(?,?,?, 'pending', ?, ?, ?)",
+                        (host, proc, cmd, int(time.time()), _to, _ref))
         c.commit()
-        log_event(host, "info", f"dispatch {proc}: {cmd}")
+        log_event(host, "info", f"dispatch {proc}: {cmd[:120]}")
         return jsonify({"id": cur.lastrowid})
 
     @app.get("/api/hosts/<host>/cmd")
     def api_cmd_poll(host):
         # agent 轮询: 拿最早一条 pending
         c = db()
-        row = c.execute("SELECT id,proc,cmd FROM cmds WHERE host=? AND status='pending' ORDER BY id LIMIT 1", (host,)).fetchone()
+        row = c.execute("SELECT id,proc,cmd,timeout FROM cmds WHERE host=? AND status='pending' ORDER BY id LIMIT 1", (host,)).fetchone()
         if not row: return jsonify({"ok": True, "cmd": None})
         c.execute("UPDATE cmds SET status='running' WHERE id=?", (row[0],)); c.commit()
-        return jsonify({"ok": True, "cmd": {"id": row[0], "proc": row[1], "cmd": row[2]}})
+        return jsonify({"ok": True, "cmd": {"id": row[0], "proc": row[1], "cmd": row[2], "timeout": row[3]}})
 
     @app.post("/api/hosts/<host>/result")
     def api_result(host):
         if not need_auth(): return jsonify({"error":"unauth"}), 401
         d = request.get_json(force=True, silent=True) or {}
         c = db()
+        cid = d.get("id", 0)
+        # AI 诊断输出很长, ai-report 单独放宽到 20000; 其它自愈指令仍截 500
+        try:
+            proc = c.execute("SELECT proc FROM cmds WHERE id=?", (cid,)).fetchone()
+            proc = proc[0] if proc else ""
+        except Exception:
+            proc = ""
+        lim = 20000 if proc == "ai-report" else 500
         c.execute("UPDATE cmds SET status=?, result=?, done_at=? WHERE id=?",
-                  (d.get("ok") and "done" or "failed", d.get("out","")[:500], int(time.time()), d.get("id",0)))
+                  (d.get("ok") and "done" or "failed", str(d.get("out",""))[:lim], int(time.time()), cid))
         c.commit()
-        log_event(host, "ok" if d.get("ok") else "err", f"self-heal {d.get('id')}: {d.get('out','')[:80]}")
+        log_event(host, "ok" if d.get("ok") else "err", f"self-heal {cid}: {str(d.get('out',''))[:80]}")
         return jsonify({"ok": True})
 
     # ---------- AI 自愈: 配置 / 探测 / 派发 / 记录 ----------

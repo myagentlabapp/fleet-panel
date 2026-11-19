@@ -5,7 +5,7 @@
 自检项: load1 / mem% / disk% / docker容器数 / 到server延迟
 自愈指令: server 下发 proc=service-restart|docker-restart, agent 收到后执行并回报。
 """
-import argparse, json, os, re, subprocess, time, urllib.request, socket
+import argparse, json, os, re, subprocess, threading, time, urllib.request, socket
 
 def sh(cmd, timeout=20):
     try:
@@ -143,6 +143,54 @@ def run_cmd(proc, cmd):
         return sh(f"docker restart {cmd} && echo OK || echo FAIL")
     return "unknown proc"
 
+
+# 可下发的 AI CLI 白名单 —— 与面板 api_cmd 的前缀校验保持一致(双保险)
+AI_CLIS = ("claude", "codex", "opencode", "gemini", "qwen", "aider")
+
+
+def _cli_segment(cmd):
+    """命令形如 `mkdir -p ~/ws && cd ~/ws && claude -p '...'`; 只要 && 链里有一段是以
+    白名单 CLI 开头的就放行。返回该 CLI 名, 没有则返回空串。这个校验限制的是"能不能从这个
+    通道执行任意 shell", 不是限制 mkdir/cd 之类的准备动作。"""
+    for seg in str(cmd or "").split("&&"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        head = os.path.basename(seg.split()[0])
+        if head in AI_CLIS:
+            return head
+    return ""
+
+
+def run_ai_task(cmd, timeout=180):
+    """在节点本地执行面板下发的 AI 诊断命令, 返回 (ok, out)。
+    任务由面板拼好(CLI 路径/模板/参数/workdir), agent 只负责跑 —— 面板不再 SSH 进来,
+    所以链路抖动不会打断正在跑的诊断。"""
+    cmd = (cmd or "").strip()
+    if not cmd:
+        return False, "empty cmd"
+    if not _cli_segment(cmd):
+        return False, f"refused: no segment starts with one of {AI_CLIS}"
+    try:
+        r = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True,
+                           timeout=timeout, stdin=subprocess.DEVNULL)
+        return r.returncode == 0, (r.stdout + r.stderr).strip()[-20000:]
+    except subprocess.TimeoutExpired as e:
+        part = (e.stdout or b"") + (e.stderr or b"")
+        if isinstance(part, bytes):
+            part = part.decode(errors="replace")
+        return False, (f"TIMEOUT after {timeout}s\n" + str(part)[-6000:]).strip()
+    except Exception as e:
+        return False, f"ERR {e}"
+
+
+def _ai_worker(task_id, cmd, timeout):
+    """后台线程跑 AI 任务并回传 —— 诊断常要几十秒到几分钟, 不能卡住 30s 上报/轮询循环。"""
+    ok, out = run_ai_task(cmd, timeout)
+    print(f"[agent] ai-report {task_id} {'ok' if ok else 'fail'} ({len(out)} bytes)")
+    api("POST", base + f"/api/hosts/{args.host}/result",
+        {"id": task_id, "ok": ok, "out": out[:20000]}, args.token)
+
 def main():
     global args, base
     ap = argparse.ArgumentParser(); ap.add_argument("--server", required=True)
@@ -151,6 +199,7 @@ def main():
     args = ap.parse_args()
     base = args.server.rstrip("/")
     print(f"[agent] {args.host} -> {base}  every {args.interval}s")
+    running = set()          # 正在跑的 ai-report 任务 id, 避免同一任务重复执行
     while True:
         m = measure()
         api("POST", base + "/api/agent/report", m, args.token)
@@ -158,11 +207,25 @@ def main():
         got = api("GET", base + f"/api/hosts/{args.host}/cmd", token=args.token)
         if got.get("ok") and got.get("cmd"):
             c = got["cmd"]
-            print(f"[agent] self-heal {c['id']} {c['proc']} {c['cmd']}")
-            out = run_cmd(c["proc"], c["cmd"])
-            ok = "OK" in out
-            api("POST", base + f"/api/hosts/{args.host}/result",
-                {"id": c["id"], "ok": ok, "out": out[:400]}, args.token)
+            if c["proc"] == "ai-report":
+                # 长任务: 丢给后台线程, 主循环继续上报
+                if c["id"] not in running:
+                    running.add(c["id"])
+                    to = int(c.get("timeout") or 180)
+                    print(f"[agent] ai-report {c['id']} start (timeout {to}s)")
+
+                    def _wrap(tid, cmd, to):
+                        try:
+                            _ai_worker(tid, cmd, to)
+                        finally:
+                            running.discard(tid)
+                    threading.Thread(target=_wrap, args=(c["id"], c["cmd"], to), daemon=True).start()
+            else:
+                print(f"[agent] self-heal {c['id']} {c['proc']} {c['cmd']}")
+                out = run_cmd(c["proc"], c["cmd"])
+                ok = "OK" in out
+                api("POST", base + f"/api/hosts/{args.host}/result",
+                    {"id": c["id"], "ok": ok, "out": out[:400]}, args.token)
         time.sleep(args.interval)
 
 if __name__ == "__main__":
