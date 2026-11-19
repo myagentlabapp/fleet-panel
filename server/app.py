@@ -3119,12 +3119,26 @@ def probe_agents(host):
 
 
 def _recent_events(host, n=8):
+    """近期事件摘要。注意: 只给 AI 当背景, 必须去递归 —— 上一次 AI 失败的 output 里
+    会原样带着上上次的整条命令, 不截断的话 prompt 会一次比一次长, agent 越查越偏,
+    最后必然撞超时。这里: 多取几行候选, 过滤掉 AI 自身的 ERR Command/failed 洪水,
+    每条截断到 60 字, 最多给 5 条。"""
     try:
         rows = db().execute("SELECT at,level,msg FROM events WHERE host=? ORDER BY at DESC LIMIT ?",
-                            (host, n)).fetchall()
+                            (host, max(n * 4, 24))).fetchall()
     except Exception:
         return []
-    return [f"{time.strftime('%H:%M', time.localtime(t))} [{lv}] {m}" for t, lv, m in rows]
+    out = []
+    for t, lv, m in rows:
+        s = str(m or "")
+        # 递归源: 上一次 AI 派发的失败堆栈, 里面嵌着完整的 bash 命令与再上一次的 prompt
+        if "ERR Command" in s or "timed out after" in s or "tool call could not be parsed" in s:
+            continue
+        s = " ".join(s.split())[:60]
+        out.append(f"{time.strftime('%H:%M', time.localtime(t))} [{lv}] {s}")
+        if len(out) >= 5:
+            break
+    return out
 
 
 def build_task(host, reason, mode, cfg=None):
@@ -3163,8 +3177,73 @@ def build_task(host, reason, mode, cfg=None):
     return "\n".join(lines)
 
 
+def _ai_clean_env():
+    """给子进程(claude -p)用的最小环境: 只保留认证与必要变量, 剥掉所有 CLAUDE_CODE_* / AI_AGENT,
+    避免 claude 把自己识别成"当前会话子进程"挂起等 messaging socket。"""
+    raw = dict(os.environ)
+    keep = {"HOME", "USER", "LOGNAME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+            "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_AUTOUPDATER",
+            "API_TIMEOUT_MS", "CLAUDE_EFFORT"}
+    env = {k: v for k, v in raw.items() if k in keep and v is not None}
+    # 兜底: 面板进程 HOME=/home/yy, 远端 root 节点的 HOME 由 sshd 提供, 这里只给本机分支用
+    env.setdefault("HOME", os.path.expanduser("~"))
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    # 面板继承的 CLAUDE_CODE_* 全部丢弃 (显式)
+    for k in list(env):
+        if k.startswith("CLAUDE_") and k not in ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",):
+            env.pop(k, None)
+    return env
+
+
+def _ai_run_ssh(host, cmd, timeout=120, clean_env=None):
+    """与 term_run 等价但 env 干净 + 可控 timeout, 专给 AI 派发用。
+    远端用 ssh -o BatchMode; 命令本身已含 env -i 包装时可再包一层, 这里只负责通道。"""
+    clean_env = clean_env or _ai_clean_env()
+    addr, rec = _node_login(host)
+    if not addr:
+        return {"ok": True, "done": False, "msg": f"未找到节点 {host} 的地址(先在节点管理里纳管)"}
+    # 本机节点
+    if host in ("", "this", "local", socket.gethostname(), node_domain(socket.gethostname())):
+        try:
+            r = _sp.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=timeout, env=clean_env)
+            return {"ok": True, "done": True, "rc": r.returncode,
+                    "out": (r.stdout + r.stderr)[-8000:]}
+        except _sp.TimeoutExpired:
+            return {"ok": True, "done": False, "msg": f"执行超时({timeout}s)"}
+        except Exception as e:
+            return {"ok": True, "done": False, "msg": f"ERR {e}"}
+    # 远端: ssh 免密
+    args = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR"]
+    if os.path.isfile(NODE_KEY):
+        args += ["-i", NODE_KEY, "-o", "IdentitiesOnly=yes"]
+    full = args + [f"{NODE_USER}@{addr}", cmd]
+    try:
+        p = _sp.run(full, capture_output=True, text=True, timeout=timeout, env=clean_env)
+        # ssh 自身失败(rc=255)视为通道不可达
+        if p.returncode == 255:
+            return {"ok": True, "done": False, "msg": f"节点 {host}({addr}) SSH 通道不可达: {p.stderr.strip()[-200:]}"}
+        return {"ok": True, "done": True, "rc": p.returncode, "out": (p.stdout + p.stderr)[-8000:]}
+    except _sp.TimeoutExpired:
+        return {"ok": True, "done": False, "msg": f"节点 {host}({addr}) 执行超时({timeout}s)"}
+    except Exception as e:
+        return {"ok": True, "done": False, "msg": f"ERR {e}"}
+
+
 def _run_ai(host, reason, mode, cfg):
-    """同步执行一次 agent 调用, 把结果写库并推送。返回记录 dict。"""
+    """同步执行一次 agent 调用, 把结果写库并推送。返回记录 dict。
+
+    与旧版的三处关键差别(都是实测出来的):
+      1. env 干净 —— 面板进程带着 CLAUDE_CODE_SESSION_ID / MESSAGING_SOCKET 等值, 传下去会让
+         claude 以为自己是被当前会话拉起子进程, 挂起等信号, 一直挂到 SSH 超时。见 _ai_clean_env。
+      2. HOME 不写死 —— 用 ~ 让远端 sshd 自己展开(HOME=/root 还是 /home/yy 由登录用户决定)。
+         写死 $HOME 在面板机展开成 /home/yy, 远端 root 节点没这目录 -> cd 失败。
+      3. 工具/轮次/MCP 收紧 —— --strict-mcp-config 跳过 10 个 MCP 的初始化探测(实测 100s+ -> 5s),
+         --max-turns 限制反复探查, --permission-mode bypassPermissions 避免非交互下工具调用被拒。
+    """
     hc = ai_host_conf(cfg, host)
     cli_name = hc["cli"]
     tmpl = (cfg.get("custom_clis") or {}).get(cli_name) or "{prompt}"
@@ -3179,37 +3258,46 @@ def _run_ai(host, reason, mode, cfg):
     prompt = build_task(host, reason, mode, cfg)
     # 模板里的 {prompt} 用 shell 单引号安全转义后替换
     call = tmpl.replace("{prompt}", _shq(prompt))
+
+    # claude 专属的收紧参数: 只对基于 claude 的 CLI 生效, 其它 CLI 不认识这些 flag
+    if "claude" in cli_name.lower():
+        call += (" --strict-mcp-config --permission-mode bypassPermissions"
+                 " --max-turns 8 --tools 'Bash,Read,Grep'")
+
     c = db()
     cur = c.execute("INSERT INTO ai_fixes(host,reason,cli,mode,status,started_at) VALUES(?,?,?,?,?,?)",
                     (host, reason[:500], cli_name, mode, "running", int(time.time())))
     c.commit()
     fid = cur.lastrowid
-    # workdir 三态: 显式填了 -> cd 该目录; 留空 -> 面板约定逐次工作区 $HOME/.fleet-agent/work/run-<fid>
-    # ($HOME 远端=root / 本地=yy 都可达可写; run-<fid> 与 ai_fixes 行号一对一, 产物好坏统计)
+    # workdir 三态: 显式填了 -> cd 该目录; 留空 -> 面板约定逐次工作区 ~/.fleet-agent/work/run-<fid>
+    # 注意用 ~ 而不是 $HOME: 远端 sshd 展开的 HOME 才是登录用户的真实家目录
     wd = (hc.get("workdir") or "").strip()
     if wd:
         full = f"cd {_shq(wd)} && {call}"
         rec_wd = wd
     else:
-        ws = "$HOME/.fleet-agent/work/run-%d" % fid
+        ws = "~/.fleet-agent/work/run-%d" % fid
         full = f"mkdir -p {ws} && cd {ws} && {call}"
         rec_wd = f"~/.fleet-agent/work/run-{fid}"
+    timeout = int(hc.get("timeout") or 120)
     log_event(host, "info", f"AI {mode} 开始: {cli_name} #{fid} @ {rec_wd}")
-    try:
-        r = term_run(host, full, timeout=int(hc.get("timeout") or 300))
-        if r.get("done"):
-            out = str(r.get("out", ""))
-            status = "done" if r.get("rc", 0) == 0 else "failed"
-        else:
-            out = str(r.get("msg") or "SSH 通道不可达")
-            status = "failed"
-    except Exception as e:
-        out, status = f"ERR {e}", "failed"
+    t0 = time.time()
+    r = _ai_run_ssh(host, full, timeout=timeout)
+    elapsed = round(time.time() - t0, 1)
+    if r.get("done"):
+        out = str(r.get("out", ""))
+        status = "done" if r.get("rc", 0) == 0 else "failed"
+    else:
+        out = str(r.get("msg") or "SSH 通道不可达")
+        status = "failed"
     out = out[-8000:]
+    # 头部带上实测上下文, 方便下次一眼看出是超时、权限还是模型问题
+    out = f"[rc={r.get('rc')} elapsed={elapsed}s timeout={timeout}s]\n" + out
     c.execute("UPDATE ai_fixes SET status=?, done_at=?, output=?, workdir=? WHERE id=?",
               (status, int(time.time()), out, rec_wd, fid))
     c.commit()
-    head = (out.strip().splitlines() or ["(无输出)"])[0][:160]
+    head = (out.strip().splitlines() or ["(无输出)"])[1:2] or ["(无输出)"]
+    head = (head[0] if isinstance(head, list) else head)[:160]
     notify_ex("warn" if status == "failed" else "info", host,
               f"AI {mode} {status}: {head}")
     log_event(host, "ok" if status == "done" else "warn", f"AI {mode} #{fid} {status}: {head}")
