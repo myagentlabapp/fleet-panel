@@ -28,6 +28,58 @@ def ping_ms(addr=None, timeout=2, count=3):
     except Exception:
         return 0.0
 
+def _facts():
+    """节点实况: 系统服务 / docker / nginx / 证书 / cron。
+    面板的多机管理卡片直接读这份上报, 不再从面板侧 SSH 现取。
+    缺二进制的机器(没 docker / 没 nginx)不会崩, 只是 ok=False。"""
+    f = {}
+    # --- systemd 运行中的服务 ---
+    o = sh("systemctl list-units --type=service --state=running --plain --no-legend --no-pager 2>/dev/null")
+    names = []
+    for ln in o.splitlines():
+        p = ln.split()
+        if p and p[0].endswith(".service"):
+            names.append(p[0][:-8])
+    f["services"] = {"count": len(names), "names": names[:40]}
+
+    # --- docker: 先判存在, 再取容器 ---
+    if sh("command -v docker 2>/dev/null"):
+        o = sh('docker ps --format "{{.Names}}|{{.State}}" 2>/dev/null')
+        items = []
+        for ln in o.splitlines():
+            if "|" in ln:
+                nm, st = ln.split("|", 1)
+                items.append({"name": nm, "state": st})
+        f["docker"] = {"ok": True, "count": len(items), "items": items[:20]}
+    else:
+        f["docker"] = {"ok": False, "count": 0, "items": []}
+
+    # --- nginx: 站点数 ---
+    has_nginx = bool(sh("command -v nginx 2>/dev/null"))
+    o = sh("ls -1 /etc/nginx/sites-enabled/ /etc/nginx/conf.d/*.conf 2>/dev/null")
+    sites = len([x for x in o.splitlines() if x.strip()])
+    f["nginx"] = {"ok": has_nginx, "sites": sites}
+
+    # --- 证书: 数量 + 最早到期 ---
+    files = sh("for d in /etc/nginx/ssl /etc/letsencrypt/live /root/.acme.sh; do "
+               "find \"$d\" -maxdepth 3 \\( -name '*.pem' -o -name '*.crt' \\) 2>/dev/null; "
+               "done | sort -u | head -50")
+    flist = [x for x in files.splitlines() if x.strip()]
+    if flist:
+        o = sh("for f in " + " ".join("'" + x.replace("'", "") + "'" for x in flist[:50]) + "; do "
+               "openssl x509 -in \"$f\" -noout -enddate 2>/dev/null | cut -d= -f2-; done")
+        ends = sorted(x.strip() for x in o.splitlines() if x.strip() and "=" not in x)
+        f["certs"] = {"count": len(flist), "earliest": (ends[0] if ends else "")}
+    else:
+        f["certs"] = {"count": 0, "earliest": ""}
+
+    # --- cron ---
+    o = sh("crontab -l 2>/dev/null")
+    cl = [x for x in o.splitlines() if x.strip() and not x.lstrip().startswith("#")]
+    f["cron"] = {"count": len(cl), "items": [x.strip()[:120] for x in cl[:10]]}
+    return f
+
+
 def measure():
     # load
     try:
@@ -50,9 +102,13 @@ def measure():
     # docker 容器数
     dc = sh("docker ps -q 2>/dev/null | wc -l")
     docker = int(re.search(r"\d+", dc).group()) if re.search(r"\d+", dc) else 0
+    try:
+        facts = _facts()
+    except Exception:
+        facts = {}
     return {"host": args.host, "ip": local_ip(), "inet": "",
             "load1": round(l1, 2), "mem": round(mem, 1), "disk": round(disk, 1),
-            "docker": docker, "latency": ping_ms()}
+            "docker": docker, "latency": ping_ms(), "facts": facts}
 
 def local_ip():
     s = None

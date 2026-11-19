@@ -901,8 +901,7 @@ def _wmon_rows():
 
 
 # 远端执行通道: 面板机对节点机的 SSH 免密(部署时把 fleet 公钥写进节点 root 的
-# [authorized-keys])。agent.py 只做「上报 + 白名单自愈」, 不放行任意 shell, 所以远端
-# 终端不再等 agent, 直接复用面板已有的 SSH 通道。
+# [authorized-keys])。agent.py 负责「定期上报 + 白名单自愈」; 远端终端/跨机执行走这条 SSH 通道。
 NODE_KEY = os.environ.get("FLEET_NODE_KEY", os.path.expanduser("~/.ssh/fleet_ed25519"))
 NODE_USER = os.environ.get("FLEET_NODE_USER", "root")
 
@@ -2942,6 +2941,13 @@ def db():
                 c.execute("ALTER TABLE ai_fixes ADD COLUMN workdir TEXT")
         except Exception:
             pass
+        # 幂等迁移: hosts 增加 facts —— agent 上报的节点实况(服务/容器/nginx/证书/cron)
+        try:
+            _hcols = [r[1] for r in c.execute("PRAGMA table_info(hosts)")]
+            if "facts" not in _hcols:
+                c.execute("ALTER TABLE hosts ADD COLUMN facts TEXT")
+        except Exception:
+            pass
         _conn.c = c
     return _conn.c
 
@@ -2988,16 +2994,25 @@ def report(host, ip, inet, metrics):
     wk = 1 if lat   < th["latency_ms"] else 0
     alerts = (1-lk)+(1-mk)+(1-dk)+(1-wk)
     sev = "ok" if alerts==0 else ("warn" if alerts<=2 else "crit")
+    # agent 上报的节点实况(服务/容器/nginx/证书/cron); 老版本 agent 不带 facts,
+    # 此时写空串, 由 SQL 的 CASE 保留库里已有的 facts, 不会被清空。
+    try:
+        _facts = metrics.get("facts")
+        facts_json = json.dumps(_facts, ensure_ascii=False) if isinstance(_facts, dict) and _facts else ""
+    except Exception:
+        facts_json = ""
     c = db()
     c.execute("""INSERT INTO hosts(name,ip,inet,loaded,mem,disk,docker,latency,
-                 load_ok,mem_ok,disk_ok,latency_ok,alerts,sev,at)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 load_ok,mem_ok,disk_ok,latency_ok,alerts,sev,at,facts)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(name) DO UPDATE SET
                  ip=excluded.ip,inet=excluded.inet,loaded=excluded.loaded,mem=excluded.mem,
                  disk=excluded.disk,docker=excluded.docker,latency=excluded.latency,
                  load_ok=excluded.load_ok,mem_ok=excluded.mem_ok,disk_ok=excluded.disk_ok,
-                 latency_ok=excluded.latency_ok,alerts=excluded.alerts,sev=excluded.sev,at=excluded.at""",
-              (host, ip, inet, load1, mem, disk, docker, lat, lk, mk, dk, wk, alerts, sev, int(time.time())))
+                 latency_ok=excluded.latency_ok,alerts=excluded.alerts,sev=excluded.sev,at=excluded.at,
+                 facts=CASE WHEN excluded.facts<>'' THEN excluded.facts ELSE hosts.facts END""",
+              (host, ip, inet, load1, mem, disk, docker, lat, lk, mk, dk, wk, alerts, sev,
+               int(time.time()), facts_json))
     if alerts:
         parts = []
         if not lk: parts.append(f"load={load1}")
@@ -3013,11 +3028,17 @@ def report(host, ip, inet, metrics):
     # 静默 —— 快速恢复,避免重复轰炸
     c.execute("DELETE FROM events WHERE at < ?", (int(time.time())-86400,))
     c.commit()
+    # 每节点监控历史: 无论数据来自 agent 主动上报还是面板兜底巡检, 都落同一份序列
+    try:
+        _node_hist_append(host, {"ts": int(time.time()), "load": load1, "mem": mem,
+                                 "disk": disk, "docker": docker})
+    except Exception:
+        pass
     return {"ok": True, "sev": sev, "alerts": alerts}
 
 # ---------- AI 自愈: 异常 -> 派发给节点自带 agent CLI -> 报告回传 ----------
-# 不依赖 agent.py(它没部署到任何节点)。复用面板到各节点的 SSH 免密通道(term_run),
-# 在目标节点上直接跑该节点自己的 claude/codex/opencode, 零部署即可全机队生效。
+# fleet-agent 已部署到全部托管节点(只做上报 + 白名单自愈, 不放行任意 shell), AI 自愈需要
+# 跑节点本地的 claude/codex/opencode, 所以走面板到各节点的 SSH 免密通道(term_run)。
 AI_CFG_FILE = os.path.join(DATA, "agents_ai.json")
 AI_PROBES = ["claude", "codex", "opencode", "gemini", "qwen", "aider"]
 _AI_STATE = {}          # host -> 上次派发时间戳(cooldown 去重)
@@ -3223,11 +3244,12 @@ def _auto_dispatch(host, reason):
         log_event(host, "warn", f"AI 自动派发失败: {e}")
 
 
-# ---------- 节点巡检 (SSH 直采) ----------
-# agent.py 只在设计里, 没有部署到任何节点(节点上没有 fleet-agent 进程/systemd 单元),
-# 所以 hosts 表的行一直是初始值 —— 面板上「正常」其实是没数据。这里改用面板已有的
-# SSH 免密通道直接采集 load/mem/disk/docker, 结果走同一个 report() 落库+告警,
-# 与 agent 上报的语义完全一致, 只是采集端换成面板自己。
+# ---------- 节点巡检 (agent 上报为主, SSH 直采仅兜底) ----------
+# 每台托管机都装了 fleet-agent(systemd 单元 fleet-agent.service, 30s 一次 POST /api/agent/report),
+# 正常情况下 hosts 表 / node_mon_history 的数据全部来自 agent 主动上报。
+# 下面的 SSH 直采只用于：agent 超过 NODE_AGENT_STALE 秒没上报时的兜底补采,
+# 避免面板上某节点数据永久停在最后一次上报。
+NODE_AGENT_STALE = int(os.environ.get("FLEET_AGENT_STALE", "180"))
 NODE_POLL_SEC = int(os.environ.get("FLEET_NODE_POLL", "90"))
 # 用 base64 包一层再交给 ssh, 避免多层引号被 sshd 的 bash -c 拆坏
 _NODE_PROBE_SH = (
@@ -3281,13 +3303,20 @@ def _node_hist_append(host, pt):
             pass
 
 def node_poll_once():
+    """agent 上报为主: 数据新鲜(最近 NODE_AGENT_STALE 秒内有上报)的节点直接跳过,
+    只有超时没上报的才用 SSH 兜底补采, 免得面板数据停在最后一次上报。"""
     c = db()
-    rows = c.execute("SELECT name,ip,inet FROM hosts").fetchall()
+    rows = c.execute("SELECT name,ip,inet,at FROM hosts").fetchall()
     me = socket.gethostname()
-    for name, ip, inet in rows:
+    now = int(time.time())
+    for name, ip, inet, at in rows:
         # 10.8.0.1/10.8.0.2 都是面板机自己的 wg/容器网卡地址
         local = (name == me) or ip in SITE["_panel_ips_set"]
-        # 本地也采一遍(不跳过), 否则本地那行的数据会停在上次部署时, 越放越旧
+        # agent 上报仍然新鲜 -> 直接用 agent 的数据, 不打扰节点
+        if at and (now - int(at)) <= NODE_AGENT_STALE:
+            _NODE_STATE[name] = "ok"
+            continue
+        # agent 超时未上报 -> SSH 兜底补采一轮(report 内部会落库+写监控历史)
         r = term_run("this" if local else name, _NODE_PROBE_CMD)
         if r.get("done"):
             try:
@@ -3295,9 +3324,6 @@ def node_poll_once():
                 report(name, ip, inet, {"load1": float(load1), "mem": float(mem),
                                         "disk": float(disk), "docker": int(dc),
                                         "latency": 0.0 if local else _ping_ms(node_addr(name, ip))})
-                _node_hist_append(name, {"ts": int(time.time()), "load": float(load1),
-                                         "mem": float(mem), "disk": float(disk),
-                                         "docker": int(dc)})
                 _NODE_STATE[name] = "ok"
                 continue
             except Exception as e:
@@ -4519,19 +4545,23 @@ def make_app():
         if not need_auth(): return jsonify({"error":"unauth"}), 401
         c = db()
         rows = c.execute("""SELECT name,ip,inet,loaded,mem,disk,docker,latency,
-                     load_ok,mem_ok,disk_ok,latency_ok,alerts,sev,at FROM hosts
+                     load_ok,mem_ok,disk_ok,latency_ok,alerts,sev,at,facts FROM hosts
                      ORDER BY sev DESC, name""").fetchall()
         now = int(time.time())
         me = socket.gethostname()
         out = []
         for r in rows:
-            (name,ip,inet,loaded,mem,disk,docker,lat, lk,mk,dk,wk,alerts,sev,at) = r
+            (name,ip,inet,loaded,mem,disk,docker,lat, lk,mk,dk,wk,alerts,sev,at,facts) = r
             # 对外只给域名; 原始地址放 backup_ip 作应急记录(WG 断线时用)
             dm = node_domain(name)
+            try:
+                fx = json.loads(facts) if facts else {}
+            except Exception:
+                fx = {}
             out.append({"name":name,"ip":dm,"inet":dm,"backup_ip":ip,
                 "local": name == me, "load1":loaded,"mem":mem,"disk":disk,
                 "docker":docker,"latency":lat,"alerts":alerts,"sev":sev,
-                "ago": now-at if at else None})
+                "ago": now-at if at else None, "facts": fx})
         return jsonify(out)
 
     @app.get("/api/hosts/<host>")
@@ -4547,26 +4577,39 @@ def make_app():
     def api_node_mon():
         if not need_auth(): return jsonify({"error":"unauth"}), 401
         """多机管理按节点监控: host=local 或空 → 走本机 /api/mon 逻辑的数据;
-        非本机 → 实时快照(SSH 探测) + node_mon_history.json 历史。"""
+        非本机 → 直接读 agent 上报落库的数据(hosts 表 + node_mon_history.json),
+        只有 agent 超过 NODE_AGENT_STALE 没上报时才 SSH 兜底补采一次。"""
         host = request.args.get("host", "local")
         me = socket.gethostname()
         if host in ("", "local", me, node_domain(me)):
             return jsonify({"local": True, "hist": _mon_history()[-240:]})
-        row = db().execute("SELECT name,ip FROM hosts WHERE name=?", (host,)).fetchone()
+        row = db().execute("SELECT name,ip,loaded,mem,disk,docker,at FROM hosts WHERE name=?", (host,)).fetchone()
         if not row:
             return jsonify({"error": f"节点 {host} 未纳管"}), 404
-        r = term_run(host, _NODE_PROBE_CMD, timeout=20)
-        snap = None
-        if r.get("done"):
-            try:
-                load1, mem, disk, dc = str(r.get("out", "")).strip().splitlines()[-1].split("|")
-                snap = {"ts": int(time.time()), "load": float(load1),
-                        "mem": float(mem), "disk": float(disk), "docker": int(dc)}
-            except Exception:
-                snap = None
+        name, ip, loaded, mem, disk, docker, at = row
+        now = int(time.time())
         hist = _node_hist_load().get(host) or []
-        return jsonify({"local": False, "name": host, "snap": snap,
-                        "hist": hist[-240:], "reachable": bool(snap)})
+        fresh = bool(at) and (now - int(at)) <= NODE_AGENT_STALE
+        snap, source = None, "agent"
+        if fresh:
+            # agent 上报的数据就是快照, 不打扰节点
+            snap = {"ts": int(at), "load": loaded, "mem": mem, "disk": disk, "docker": docker}
+        else:
+            # agent 超时未上报 -> SSH 兜底(与 node_poll_once 同一判定)
+            source = "ssh"
+            r = term_run(host, _NODE_PROBE_CMD, timeout=20)
+            if r.get("done"):
+                try:
+                    load1, memv, diskv, dc = str(r.get("out", "")).strip().splitlines()[-1].split("|")
+                    snap = {"ts": int(time.time()), "load": float(load1),
+                            "mem": float(memv), "disk": float(diskv), "docker": int(dc)}
+                except Exception:
+                    snap = None
+            if not snap and hist:
+                # 兜底也失败但有历史 -> 用最后一个点当快照
+                snap = hist[-1]
+        return jsonify({"local": False, "name": host, "snap": snap, "source": source,
+                        "stale": not fresh, "hist": hist[-240:], "reachable": bool(snap)})
 
     # ---- T6: 跨机执行层端点 (统一走 _docker/term_run 的 SSH 通道, base64 包裹) ----
     def _host_or_404(host):
@@ -9290,7 +9333,10 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  /* ===== 左侧栏 (浅色) ===== */
  .sidebar{width:var(--panel-menu-width);background:linear-gradient(var(--panel-menu-bg-color),var(--panel-menu-bg-color)) no-repeat top;background-color:var(--card);color:var(--text1);display:flex;flex-direction:column;
  position:fixed;top:0;bottom:0;left:0;z-index:100}
- .fixed{position:fixed;left:0;top:0;z-index:100;flex-shrink:0}
+ /* 装饰层(渐变 logo 背景 SVG)不能让鼠标事件; 否则会盖住下面导航第一项「概览」, 点不动 */
+ .fixed{position:fixed;left:0;top:0;z-index:100;flex-shrink:0;pointer-events:none}
+ .fixed>*{pointer-events:none}
+ .fixed>#asideFoldBtn{pointer-events:auto}
  .side-logo{display:flex;align-items:center;justify-content:center;height:49px;padding:0;flex:none}
  .side-logo svg{display:block}
  .collapse-fold{position:absolute;left:0;top:15px;z-index:200;width:24px;height:24px;padding:5px;margin-left:168px;display:flex;align-items:center;justify-content:center;background:none;border:1px solid #dcdfe6;border-radius:50%;color:#646a73;cursor:pointer;transition:color .15s,border-color .15s}
@@ -10414,12 +10460,20 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .nd-num{font-size:26px;font-weight:700;color:var(--primary)}
  .nd-grid .tbl th{font-size:12px;padding:7px 8px}
  .nd-grid .tbl td{font-size:12px;padding:7px 8px}
- .node-rt{flex-wrap:wrap;gap:10px}
+ #nodes .nd-grid{grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;align-items:stretch}
+#nodes .nd-grid>.card{display:flex;flex-direction:column}
+#nodes .nd-grid>.card>.body{flex:1;min-height:0;overflow:hidden}
+#nodes .nd-grid .tbl{table-layout:fixed;width:100%}
+#nodes .nd-grid .nd-sub th,#nodes .nd-grid .nd-sub td{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#nodes .nd-grid .nd-sub th:last-child,#nodes .nd-grid .nd-sub td:last-child{width:96px;text-align:right}
+#nodes .nd-grid .nd-sub td{height:34px;line-height:18px;padding:6px 8px}
+#nodes .nd-num{display:flex;align-items:baseline;gap:6px;line-height:1.1;margin-bottom:2px}
+.node-rt{flex-wrap:wrap;gap:10px}
 #nodes .nd-stat .head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px 0;border-bottom:none}
 #nodes .nd-stat .head h2{font-size:14px;font-weight:600}
 #nodes .nd-stat .head .btn.link{font-size:15px;line-height:1}
 #nodes .nd-stat .body{padding:4px 10px 10px}
-#nodes .nd-grid .card.nd-dbcard{grid-column:span 2}
+#nodes .nd-grid .card.nd-dbcard{grid-column:auto}
 #nodes .nd-dbtool{display:flex;align-items:center;gap:6px;padding:2px 12px 6px;flex-wrap:wrap}
 #nodes .nd-sub th{font-size:12px;padding:7px 8px;color:var(--text3);font-weight:500;background:transparent}
 #nodes .nd-sub td{font-size:12px;padding:7px 8px}
@@ -11573,13 +11627,18 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
      </div>
     </div>
     <div class="nd-grid">
-     <div class="card pane nd-stat"><div class="head"><h2>智能体 <span class="mb8" id=nd-cur-tag style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshAgent()" title="刷新">⟳</a></div><div class="body nd-num" id=nd-agent>0</div></div>
-     <div class="card pane nd-stat"><div class="head"><h2>应用 <span class="mb8" id=nd-cur-tag-app style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshApp()" title="刷新">⟳</a></div><div class="body">
-       <div class="nd-num" id=nd-app>0 <small style="font-size:13px;color:var(--text3)">可升级</small></div>
-       <table class="tbl nd-sub" style="margin-top:6px"><thead><tr><th>名称</th><th>版本</th><th>已安装</th><th>操作</th></tr></thead><tbody id=nd-app-tb></tbody></table></div></div>
-     <div class="card pane nd-stat"><div class="head"><h2>网站 <span class="mb8" id=nd-cur-tag-site style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshSite()" title="刷新">⟳</a></div><div class="body">
-       <div class="nd-num" id=nd-site>0</div><table class="tbl nd-sub" style="margin-top:6px"><thead><tr><th>名称</th><th>类型</th><th>状态</th></tr></thead><tbody id=nd-site-tb></tbody></table></div></div>
-     <div class="card pane nd-stat"><div class="head"><h2>证书 <span class="mb8" id=nd-cur-tag-cert style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshCert()" title="刷新">⟳</a></div><div class="body nd-num" id=nd-cert>0</div></div>
+     <div class="card pane nd-stat"><div class="head"><h2>智能体 <span class="mb8" id=nd-cur-tag style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshAgent()" title="刷新">⟳</a></div>
+      <div class="body"><div class="nd-num" id=nd-agent>0</div>
+       <table class="tbl nd-sub"><thead><tr><th>项目</th><th>状态</th></tr></thead><tbody id=nd-agent-tb></tbody></table></div></div>
+     <div class="card pane nd-stat"><div class="head"><h2>应用 <span class="mb8" id=nd-cur-tag-app style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshApp()" title="刷新">⟳</a></div>
+      <div class="body"><div class="nd-num" id=nd-app>0 <small style="font-size:13px;color:var(--text3)">服务</small></div>
+       <table class="tbl nd-sub"><thead><tr><th>名称</th><th>状态</th></tr></thead><tbody id=nd-app-tb></tbody></table></div></div>
+     <div class="card pane nd-stat"><div class="head"><h2>网站 <span class="mb8" id=nd-cur-tag-site style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshSite()" title="刷新">⟳</a></div>
+      <div class="body"><div class="nd-num" id=nd-site>0</div>
+       <table class="tbl nd-sub"><thead><tr><th>项目</th><th>状态</th></tr></thead><tbody id=nd-site-tb></tbody></table></div></div>
+     <div class="card pane nd-stat"><div class="head"><h2>证书 <span class="mb8" id=nd-cur-tag-cert style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshCert()" title="刷新">⟳</a></div>
+      <div class="body"><div class="nd-num" id=nd-cert>0</div>
+       <table class="tbl nd-sub"><thead><tr><th>项目</th><th>状态</th></tr></thead><tbody id=nd-cert-tb></tbody></table></div></div>
      <div class="card pane nd-stat nd-dbcard"><div class="head"><h2>数据库 <span class="nd-pill" id=nd-db>0</span> <span class="mb8" id=nd-cur-tag-db style="font-weight:400;font-size:12px"></span></h2>
        <a class="btn link" onclick="ndrefreshDb()" title="刷新">⟳</a></div>
       <div class="nd-dbtool">
@@ -11590,13 +11649,14 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
        <input class="ipt" id=nd-dbsearch style="height:26px;font-size:12px;width:110px" placeholder="搜索" oninput="ndDbLoad()">
       </div>
       <div class="body" style="padding:0 12px 8px">
-       <table class="tbl nd-sub"><thead><tr><th>名称</th><th>已授权用户</th><th>描述</th><th>操作</th></tr></thead>
+       <table class="tbl nd-sub"><thead><tr><th>名称</th><th>状态</th></tr></thead>
         <tbody id=nd-db-tb></tbody></table>
        <div class="nd-empty" id=nd-db-empty>暂无数据</div>
        <div class="pager"><span class="ph" id=nd-db-total>共 0 条</span><span class="pg cur">1</span></div>
       </div></div>
-     <div class="card pane nd-stat"><div class="head"><h2>计划任务 <span class="mb8" id=nd-cur-tag-job style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshJob()" title="刷新">⟳</a></div><div class="body">
-       <div class="nd-num" id=nd-job>0</div><table class="tbl nd-sub" style="margin-top:6px"><thead><tr><th>名称</th><th>状态</th><th>上次执行</th></tr></thead><tbody id=nd-job-tb></tbody></table></div></div>
+     <div class="card pane nd-stat"><div class="head"><h2>计划任务 <span class="mb8" id=nd-cur-tag-job style="font-weight:400;font-size:12px"></span></h2><a class="btn link" onclick="ndrefreshJob()" title="刷新">⟳</a></div>
+      <div class="body"><div class="nd-num" id=nd-job>0</div>
+       <table class="tbl nd-sub"><thead><tr><th>项目</th><th>状态</th></tr></thead><tbody id=nd-job-tb></tbody></table></div></div>
      <div class="card pane nd-stat nd-dbcard" style="grid-column:1/-1"><div class="head"><h2>节点监控 <span class="mb8" id=nd-cur-tag-mon style="font-weight:400;font-size:12px"></span></h2>
        <div class="acts"><span class="mb8" id=nd-mon-snap style="font-size:12px;color:var(--text2)"></span><a class="btn link" onclick="ndMonLoad()" title="刷新">⟳</a></div></div>
       <div class="body" style="padding:8px 16px"><div class="mobile-monitor-chart"><div id="nd-mon-chart" style="height:260px"></div></div></div>
@@ -19057,76 +19117,137 @@ async function ndload(){
  const tot=document.getElementById('nd-total');if(tot)tot.textContent='共 '+rows.length+' 条';
  const grp=document.getElementById('nd-group');
  if(grp&&grp.options.length<=1){grp.innerHTML='<option value="">请选择</option><option>默认分组</option>';}
- // 计数 —— 按当前选中节点; 只有本机有网站/证书/计划任务/应用的本地清单
- const isLoc=ndIsLocal();
- const ag=window._agents||[];
- const setT=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
- setT('nd-agent',ag.length||(ov.quicks||{}).agent||0);
- const apps=(ov.apps||[]);
- const appEl=document.getElementById('nd-app');
- if(appEl)appEl.innerHTML=isLoc?(apps.length+' <small style="font-size:13px;color:var(--text3)">可升级 0</small>'):'<span class="mb8">远端经 SSH 采集</span>';
- setT('nd-site',isLoc?((ov.quicks||{}).site||0):'-');
- // 数据库数量 = 过滤后的资产数(由 ndDbLoad 回填, 这里不覆盖)
+ // 计数统一由各 nd*Load 写(它们读 agent 上报的 facts), 这里不再用面板本机数据预填
  await Promise.all([ndAppLoad(),ndSiteLoad(),ndDbLoad(),ndJobLoad(),ndCertLoad(),ndAgentLoad(),ndMonLoad()]);
 }
 function ndAppEmptyRow(msg,cols){return `<tr><td colspan=${cols} class="empty">${msg}</td></tr>`;}
-async function ndAgentLoad(){
- try{const d=await (await fetch('/api/agents')).json();window._agents=d.list||[];
-  const e=document.getElementById('nd-agent');if(e){const n=(d.list||[]).length;e.textContent=n||((NODES.ov||{}).quicks||{}).agent||0;}}catch(e){}
+// 选中节点的 agent 实况(/api/hosts 下发的 facts) —— 卡片一律读这里, 不再从面板侧 SSH 现取
+function ndFacts(){
+ const hosts=NODES.hosts||[];
+ const h=ndIsLocal()?(hosts.find(x=>x.local)||hosts.find(x=>x.name===NODES.cur)):hosts.find(x=>x.name===NODES.cur);
+ return (h&&h.facts)||{};
 }
-async function ndrefreshAgent(){await ndAgentLoad();fpToast('智能体已刷新');}
+function ndHasFacts(){const f=ndFacts();return !!(f&&(f.services||f.docker||f.nginx||f.certs||f.cron));}
+function ndRow(name,state,cls){
+ return `<tr><td><b>${name}</b></td><td class="${cls||'mb8'}">${state}</td></tr>`;
+}
+async function ndAgentLoad(){
+ const tb=document.getElementById('nd-agent-tb');
+ const f=ndFacts();
+ let n=0,rows=[];
+ if(ndHasFacts()){
+  const svc=(f.services||{}).count||0;n=svc;
+  rows.push(ndRow('fleet-agent','上报中','sev sev-ok'));
+  rows.push(ndRow('systemd 服务',svc+' 运行中'));
+  if(f.docker&&f.docker.ok)rows.push(ndRow('docker',(f.docker.count||0)+' 容器运行中'));
+  else rows.push(ndRow('docker','未安装','mb8'));
+ }else{
+  // 老版本 agent 还没上报实况 -> 退回面板本机的智能体清单(仅本机有意义)
+  try{const d=await (await fetch('/api/agents')).json();window._agents=d.list||[];
+   n=(d.list||[]).length;rows=(d.list||[]).slice(0,5).map(x=>ndRow(x.name||'-',x.status||'正常','sev sev-ok'));}catch(e){}
+ }
+ const e=document.getElementById('nd-agent');if(e)e.textContent=n;
+ if(tb)tb.innerHTML=rows.join('')||ndAppEmptyRow('该节点 agent 尚未上报实况',2);
+}
+async function ndrefreshAgent(){await ndload();fpToast('智能体已刷新');}
 async function ndAppLoad(){
  const tb=document.getElementById('nd-app-tb');if(!tb)return;
- if(!ndIsLocal()){
-  // 远端节点: 走 SSH 通道采 docker/compose 栈, 不显示本机数据
-  tb.innerHTML='<tr><td colspan=4 class="empty">采集中…</td></tr>';
-  // docker 的模板串含 .Names/.Status 定界符, 不能按字面写进本模板, 前端用 DBRACE 拼接
-  const q='"'+DBRACE+'.Names}}|'+DBRACE+'.Status}}"';
-  const out=await runTerm(NODES.cur,'docker ps --format '+q+' 2>/dev/null | head -8');
-  const lines=(out||'').split('\n').filter(l=>l.includes('|')&&l.trim());
-  tb.innerHTML=lines.map(l=>{const [n,s]=l.split('|');
-   return `<tr><td><b>${n}</b></td><td class="mb8">-</td><td class="mb8">${s||'-'}</td>
-   <td><a class="btn link" onclick="hTerm('${NODES.cur.replace(/'/g,'')}')">终端</a></td></tr>`;}).join('')
-   ||ndAppEmptyRow('该节点无容器数据或 SSH 通道不可达',4);
+ const f=ndFacts();
+ const ap=document.getElementById('nd-app');
+ if(ndHasFacts()){
+  const svc=(f.services||{}).count||0;
+  const dk=f.docker||{}, cs=dk.items||[];
+  const rows=[];
+  for(const c of cs.slice(0,4))rows.push(ndRow(c.name,c.state==='running'?'运行中':(c.state||'-'),c.state==='running'?'sev sev-ok':'sev sev-warn'));
+  // 服务不只 docker: 没有容器就列 systemd 服务
+  if(!rows.length){
+   for(const s of ((f.services||{}).names||[]).slice(0,5))rows.push(ndRow(s,'运行中','sev sev-ok'));
+  }
+  if(!dk.ok)rows.unshift(`<tr><td colspan=2 class="mb8">该节点未安装 Docker</td></tr>`);
+  if(ap)ap.innerHTML=svc+' <small style="font-size:13px;color:var(--text3)">系统服务运行中'+(dk.ok?' / '+(dk.count||0)+' 个容器':'')+'</small>';
+  tb.innerHTML=rows.slice(0,5).join('')||ndAppEmptyRow('该节点未发现运行中的服务',2);
   return;
  }
+ // 本机且 agent 未上报: 退回面板本机 compose 清单
  let ov={};try{ov=await (await fetch('/api/overview')).json();}catch(e){}
  const apps=ov.apps||[];
- tb.innerHTML=apps.slice(0,6).map(a=>`<tr><td><b>${a.name}</b></td><td class="mb8">-</td><td class="mb8">${a.services||0} 个服务</td>
-  <td><a class="btn link" onclick="show('docker')">详情</a></td></tr>`).join('')
-  ||'<tr><td colspan=4 class="empty">暂无数据</td></tr>';
+ if(ap)ap.innerHTML=apps.length+' <small style="font-size:13px;color:var(--text3)">应用</small>';
+ tb.innerHTML=apps.slice(0,8).map(a=>ndRow(a.name,'运行中','sev sev-ok')).join('')
+  ||ndAppEmptyRow('暂无数据',2);
 }
-async function ndrefreshApp(){await ndAppLoad();fpToast('应用已刷新');}
+async function ndrefreshApp(){await ndload();fpToast('应用已刷新');}
 async function ndSiteLoad(){
- const tb=document.getElementById('nd-site-tb');if(!tb)return;
- if(!ndIsLocal()){const e=document.getElementById('nd-site');if(e)e.textContent='-';
-  tb.innerHTML=ndAppEmptyRow('该节点暂无数据',3);return;}
- let d={};try{d=await (await fetch('/api/sites')).json();}catch(e){}
+ const tb=document.getElementById('nd-site-tb');
+ const e=document.getElementById('nd-site');
+ const f=ndFacts();
+ if(ndHasFacts()){
+  const ng=f.nginx||{};
+  if(e)e.textContent=ng.sites||0;
+  const rows=[];
+  if(!ng.ok)rows.push(`<tr><td colspan=2 class="mb8">该节点未安装 nginx</td></tr>`);
+  else if(!ng.sites)rows.push(`<tr><td colspan=2 class="empty">该节点 nginx 暂无站点</td></tr>`);
+  else rows.push(ndRow('nginx 站点',ng.sites+' 个','sev sev-ok'));
+  // 站点之外: 该节点上还有其他 web 服务吗
+  const names=(f.services||{}).names||[];
+  const web=names.filter(n=>/nginx|apache|httpd|caddy|openresty|traefik|haproxy/i.test(n));
+  for(const w of web.slice(0,5))rows.push(ndRow(w,'运行中','sev sev-ok'));
+  if(tb)tb.innerHTML=rows.join('')||ndAppEmptyRow('该节点暂无网站相关服务',2);
+  return;
+ }
+ if(!ndIsLocal()){if(e)e.textContent='-';if(tb)tb.innerHTML=ndAppEmptyRow('该节点 agent 尚未上报实况',2);return;}
+ let d={};try{d=await (await fetch('/api/sites')).json();}catch(e2){}
  const sites=d.sites||[];
- tb.innerHTML=sites.slice(0,6).map(s=>`<tr><td><b>${s.name}</b></td><td class="mb8">${s.type||'-'}</td>
-  <td><span class="sev sev-${s.enabled?'ok':'warn'}">${s.enabled?'运行中':'已停止'}</span></td></tr>`).join('')
-  ||'<tr><td colspan=3 class="empty">暂无数据</td></tr>';
+ if(e)e.textContent=sites.length;
+ if(tb)tb.innerHTML=sites.slice(0,8).map(s=>ndRow(s.name,s.enabled?'运行中':'已停止',s.enabled?'sev sev-ok':'sev sev-warn')).join('')
+  ||ndAppEmptyRow('暂无数据',2);
 }
-async function ndrefreshSite(){await ndSiteLoad();fpToast('网站已刷新');}
+async function ndrefreshSite(){await ndload();fpToast('网站已刷新');}
 async function ndCertLoad(){
- const e=document.getElementById('nd-cert');if(!e)return;
- if(!ndIsLocal()){e.textContent='-';return;}
- try{const d=await (await fetch('/api/certs')).json();e.textContent=(d.certs||[]).length;}catch(x){}
+ const e=document.getElementById('nd-cert');
+ const tb=document.getElementById('nd-cert-tb');
+ const f=ndFacts();
+ if(ndHasFacts()){
+  const ct=f.certs||{};
+  if(e)e.textContent=ct.count||0;
+  const rows=[];
+  if(!ct.count)rows.push(`<tr><td colspan=2 class="mb8">该节点无证书</td></tr>`);
+  else{
+   rows.push(ndRow('证书文件',ct.count+' 个','sev sev-ok'));
+   if(ct.earliest)rows.push(ndRow('最早到期',ct.earliest));
+  }
+  if(tb)tb.innerHTML=rows.join('');
+  return;
+ }
+ if(!ndIsLocal()){if(e)e.textContent='-';if(tb)tb.innerHTML=ndAppEmptyRow('该节点 agent 尚未上报实况',2);return;}
+ try{const d=await (await fetch('/api/certs')).json();const n=(d.certs||[]).length;if(e)e.textContent=n;
+  if(tb)tb.innerHTML=n?ndRow('证书文件',n+' 个','sev sev-ok'):ndAppEmptyRow('该节点无证书',2);}catch(x){}
 }
-async function ndrefreshCert(){await ndCertLoad();fpToast('证书已刷新');}
+async function ndrefreshCert(){await ndload();fpToast('证书已刷新');}
 async function ndJobLoad(){
- const tb=document.getElementById('nd-job-tb');if(!tb)return;
- if(!ndIsLocal()){const e=document.getElementById('nd-job');if(e)e.textContent='-';
-  tb.innerHTML=ndAppEmptyRow('该节点暂无数据',3);return;}
- let d={};try{d=await (await fetch('/api/jobs')).json();}catch(e){}
+ const e=document.getElementById('nd-job');
+ const tb=document.getElementById('nd-job-tb');
+ const f=ndFacts();
+ if(ndHasFacts()){
+  const cr=f.cron||{};
+  if(e)e.textContent=cr.count||0;
+  const rows=(cr.items||[]).slice(0,5).map(c=>{
+   // cron 行前 5 段是时间字段(分 时 日 月 周), 之后才是命令; 去掉多余的引号便于阅读
+   const parts=c.split(/\s+/);
+   let nm=parts.slice(5).join(' ').replace(/["']/g,'').replace(/\s+/g,' ').trim();
+   nm=nm.replace(/^.*?acme\.sh\s*/,'acme.sh ').slice(0,40)||c.slice(0,40);
+   return ndRow(nm,'定时','sev sev-ok');
+  });
+  if(tb)tb.innerHTML=rows.join('')||ndAppEmptyRow('该节点无 crontab 任务',2);
+  return;
+ }
+ if(!ndIsLocal()){if(e)e.textContent='-';if(tb)tb.innerHTML=ndAppEmptyRow('该节点 agent 尚未上报实况',2);return;}
+ let d={};try{d=await (await fetch('/api/jobs')).json();}catch(e2){}
  const jobs=d.jobs||[];
- const e=document.getElementById('nd-job');if(e)e.textContent=jobs.length;
- tb.innerHTML=jobs.slice(0,6).map(j=>`<tr><td><b>${j.name}</b></td>
-  <td><span class="sev sev-${j.enabled?'ok':'warn'}">${j.enabled?'启用':'停用'}</span></td>
-  <td class="mb8">${j.last?new Date(j.last*1000).toLocaleString():'-'}</td></tr>`).join('')
-  ||'<tr><td colspan=3 class="empty">暂无数据</td></tr>';
+ if(e)e.textContent=jobs.length;
+ if(tb)tb.innerHTML=jobs.slice(0,8).map(j=>ndRow(j.name,j.enabled?'启用':'停用',j.enabled?'sev sev-ok':'sev sev-warn')).join('')
+  ||ndAppEmptyRow('暂无数据',2);
 }
-async function ndrefreshJob(){await ndJobLoad();fpToast('计划任务已刷新');}
+async function ndrefreshJob(){await ndload();fpToast('计划任务已刷新');}
 async function ndDbLoad(){
  const tb=document.getElementById('nd-db-tb');if(!tb)return;
  const tsel=document.getElementById('nd-dbtype');const ty=tsel?tsel.value:'';
@@ -19142,10 +19263,8 @@ async function ndDbLoad(){
   sel.innerHTML='<option>-</option>'+types.map(t=>`<option ${t===ty?'selected':''}>${t}</option>`).join('');
   if(ty)sel.value=ty;}
  tb.innerHTML=list.map(a=>`<tr>
-   <td><b>${a.name}</b> <span class="nd-dbtype-tag">${a.type||''}</span><div class="mb8" style="font-size:11px">${a.host||''}:${a.port||''}</div></td>
-   <td class="mb8">${a.user||'-'}</td>
-   <td class="mb8">${a.desc||a.remark||'-'}</td>
-   <td><a class="btn link" onclick="show('db')">管理</a> <a class="btn link" onclick="ndDbInfo('${(a.name||'').replace(/'/g,'')}')">详情</a></td>
+   <td><b>${a.name}</b> <span class="nd-dbtype-tag">${a.type||''}</span><div class="mb8" style="font-size:11px">${a.host||''}:${a.port||''} ${a.user?'· '+a.user:''}</div></td>
+   <td><a class="btn link" onclick="ndDbInfo('${(a.name||'').replace(/'/g,'')}')">详情</a></td>
   </tr>`).join('');
  const emp=document.getElementById('nd-db-empty');if(emp)emp.style.display=list.length?'none':'';
  const tot=document.getElementById('nd-db-total');if(tot)tot.textContent='共 '+list.length+' 条';
@@ -19153,15 +19272,20 @@ async function ndDbLoad(){
 }
 async function ndrefreshDb(){await ndDbLoad();fpToast('数据库已刷新');}
 async function ndMonLoad(){
- // 按选中节点画监控序列: 本机=mon_history; 远端=/api/node/mon (实时快照+巡检历史)
+ // 按选中节点画监控序列: 统一读 /api/node/mon —— 远端优先用 agent 上报的数据,
+ // 仅当 agent 超过 NODE_AGENT_STALE 未上报时才由后端 SSH 兜底补采一次。
  const tag=document.getElementById('nd-cur-tag-mon');
  const snapEl=document.getElementById('nd-mon-snap');
  const box=document.getElementById('nd-mon-chart');if(!box)return;
  ndSetTag();
- let local=true,hist=[],snap=null;
+ let local=true,hist=[],snap=null,source='agent',stale=false;
  try{const d=await (await fetch('/api/node/mon?host='+(ndIsLocal()?'local':encodeURIComponent(NODES.cur)))).json();
-  local=!!d.local;hist=d.hist||[];snap=d.snap||null;}catch(e){}
- if(snapEl)snapEl.textContent=snap?`负载 ${snap.load} · 内存 ${snap.mem}% · 磁盘 ${snap.disk}% · 容器 ${snap.docker}`:(local?'':'采集中(等下一轮巡检)…');
+  local=!!d.local;hist=d.hist||[];snap=d.snap||null;source=d.source||'agent';stale=!!d.stale;}catch(e){}
+ if(snapEl){
+  const srcTag=local?'':(source==='agent'?' · agent 上报':' · SSH 兜底补采');
+  snapEl.textContent=snap?`负载 ${snap.load} · 内存 ${snap.mem}% · 磁盘 ${snap.disk}%`+(snap.docker!=null?' · 容器 '+snap.docker:'')+srcTag:(local?'':'采集中(等下一轮 agent 上报)…');
+  if(stale&&!local)snapEl.style.color='var(--warning)';else snapEl.style.color='';
+ }
  if(!window.echarts){box.innerHTML='<div class="empty">图表组件未加载</div>';return;}
  const fmtT=ts=>{const d=new Date(ts*1000);return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);};
  if(window._ndmc)window._ndmc.dispose();
@@ -19178,7 +19302,7 @@ async function ndMonLoad(){
    {name:'内存%',type:'line',smooth:true,symbol:'none',data:hist.map(x=>x.mem),lineStyle:{width:2,color:'#e6a23c'}},
    {name:'磁盘%',type:'line',smooth:true,symbol:'none',data:hist.map(x=>x.disk),lineStyle:{width:2,color:'#f56c6c'}}
   ]});
- if(!local&&!hist.length&&!snap)box.innerHTML='<div class="empty" style="position:absolute;top:40%;left:0;right:0;text-align:center">该节点暂无历史,巡检每 90s 采一个点</div>';
+ if(!local&&!hist.length&&!snap)box.innerHTML='<div class="empty" style="position:absolute;top:40%;left:0;right:0;text-align:center">该节点暂无历史, agent 每 30s 上报一个点</div>';
 }
 function ndDbInfo(n){
  const a=(window._nddb||[]).find(x=>x.name===n);
