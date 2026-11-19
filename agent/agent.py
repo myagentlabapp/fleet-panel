@@ -106,6 +106,12 @@ def measure():
         facts = _facts()
     except Exception:
         facts = {}
+    # 自愈: 用本轮已采到的 disk/mem 判定, 省一次 df/free
+    try:
+        facts["heal"] = _selfheal(disk, mem)
+    except Exception as e:
+        facts["heal"] = {"actions": [], "blocked": [], "notes": [],
+                         "error": str(e)[:200]}
     return {"host": args.host, "ip": local_ip(), "inet": "",
             "load1": round(l1, 2), "mem": round(mem, 1), "disk": round(disk, 1),
             "docker": docker, "latency": ping_ms(), "facts": facts}
@@ -119,6 +125,113 @@ def local_ip():
         return ""
     finally:
         if s: s.close()
+
+
+# ---------- 自愈 ----------
+# 只修三类, 全是本地动作, 不依赖网络/面板/SSH:
+#   1) 关键服务挂了   -> systemctl restart
+#   2) 磁盘 > 90%     -> journal vacuum + 清 /tmp 顶层老文件
+#   3) 内存 > 95%     -> 只记录, 不动手(杀进程风险不可控)
+# wg0/wg-quick/wg-easy 一律不碰 —— 隧道归别处管。
+HEAL_SERVICES = ("sshd", "docker", "fail2ban", "cron")
+HEAL_DISK_PCT = 90
+HEAL_MEM_PCT = 95
+HEAL_COOLDOWN = 300      # 同一 target 两次修复最小间隔(秒)
+HEAL_MAX_FAIL = 5        # 同一 target 连续失败上限, 到顶就停手
+_HEAL_STATE = {"last": {}, "fails": {}, "blocked": set(),
+               "actions": [], "notes": []}   # 进程内存态, agent 重启后清零
+
+
+def _rc(cmd, timeout=20):
+    """执行并返回退出码(不看输出内容 —— 用 sh() 的输出判成功会被空输出骗到)。"""
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                              timeout=timeout, stdin=subprocess.DEVNULL).returncode
+    except Exception:
+        return -1
+
+
+def _heal_svc_ok(name):
+    """服务该不该管: 单元存在 且 已 enable。人工 disable 掉的不自动拉起, 避免和运维操作打架。"""
+    if _rc(f"systemctl cat {name} >/dev/null 2>&1") != 0:
+        return False
+    return sh(f"systemctl is-enabled {name} 2>/dev/null").strip() == "enabled"
+
+
+def _heal_action(target, action, fn):
+    """执行一次修复, 带冷却 + 失败上限。fn 返回 (ok, err)。"""
+    now = int(time.time())
+    st = _HEAL_STATE
+    if target in st["blocked"]:
+        return None
+    last = st["last"].get(target, 0)
+    if now - last < HEAL_COOLDOWN:
+        return None
+    st["last"][target] = now
+    try:
+        ok, err = fn()
+    except Exception as e:
+        ok, err = False, str(e)
+    if ok:
+        st["fails"][target] = 0
+    else:
+        st["fails"][target] = st["fails"].get(target, 0) + 1
+        if st["fails"][target] >= HEAL_MAX_FAIL:
+            st["blocked"].add(target)
+    st["actions"].append({"at": now, "target": target, "action": action,
+                          "ok": bool(ok), "err": str(err or "")[:200]})
+    del st["actions"][:-20]
+    return ok
+
+
+def _selfheal(disk_pct=None, mem_pct=None):
+    """每轮上报前自检自修。全部本地执行, 网络/面板/SSH 断了照样工作。"""
+    st = _HEAL_STATE
+
+    # --- 1) 关键服务 ---
+    for svc in HEAL_SERVICES:
+        if not _heal_svc_ok(svc):
+            continue          # 不存在或被人为 disable, 不管
+        if sh(f"systemctl is-active {svc} 2>/dev/null").strip() == "active":
+            continue
+
+        def _do_svc(s=svc):
+            sh(f"systemctl restart {s} 2>&1", timeout=60)
+            ok = sh(f"systemctl is-active {s} 2>/dev/null").strip() == "active"
+            return ok, "" if ok else "restart 后仍未 active"
+
+        _heal_action(svc, f"systemctl restart {svc}", _do_svc)
+
+    # --- 2) 磁盘 ---
+    try:
+        d = float(disk_pct if disk_pct is not None else
+                  (sh("df -P / | awk 'NR==2{gsub(\"%\",\"\",$5); print $5}'").strip() or 0))
+    except Exception:
+        d = 0.0
+    if d > HEAL_DISK_PCT:
+        def _do_disk():
+            sh("journalctl --vacuum-size=500M 2>&1", timeout=60)
+            sh("find /tmp -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null", timeout=30)
+            after = sh("df -P / | awk 'NR==2{gsub(\"%\",\"\",$5); print $5}'").strip()
+            try:
+                freed = float(after) <= d
+            except Exception:
+                freed = True
+            return freed, "" if freed else f"清理后仍 {after}%"
+        _heal_action("disk", "journal vacuum + 清 /tmp 老文件", _do_disk)
+
+    # --- 3) 内存: 只记录 ---
+    try:
+        m = float(mem_pct if mem_pct is not None else 0)
+    except Exception:
+        m = 0.0
+    if m > HEAL_MEM_PCT:
+        st["notes"].append({"at": int(time.time()),
+                            "msg": f"mem {m:.1f}% 超过 {HEAL_MEM_PCT}%, 未处理(杀进程风险不可控)"})
+        del st["notes"][:-10]
+
+    return {"actions": list(st["actions"]), "blocked": sorted(st["blocked"]),
+            "notes": list(st["notes"])}
 
 def api(method, url, body=None, token=None, timeout=25):
     req = urllib.request.Request(url, method=method,

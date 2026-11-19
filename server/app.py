@@ -3010,6 +3010,24 @@ def report(host, ip, inet, metrics):
         facts_json = json.dumps(_facts, ensure_ascii=False) if isinstance(_facts, dict) and _facts else ""
     except Exception:
         facts_json = ""
+    # agent 自愈记录 -> 事件流(按 at 去重, 同一条不重复记)
+    try:
+        _heal = (_facts or {}).get("heal") or {}
+        for a in (_heal.get("actions") or [])[-10:]:
+            key = f"{a.get('at')}:{a.get('target')}"
+            if key in _HEAL_SEEN.get(host, set()):
+                continue
+            _HEAL_SEEN.setdefault(host, set()).add(key)
+            _act = f"{a.get('target')}: {a.get('action')}"
+            if a.get("ok"):
+                log_event(host, "ok", f"自愈成功 {_act}")
+            else:
+                log_event(host, "warn", f"自愈失败 {_act} — {str(a.get('err') or '')[:80]}")
+        # 每个节点只留最近 200 个 key, 防止集合无限增长
+        if len(_HEAL_SEEN.get(host, ())) > 200:
+            _HEAL_SEEN[host] = set(sorted(_HEAL_SEEN[host])[-200:])
+    except Exception:
+        pass
     c = db()
     c.execute("""INSERT INTO hosts(name,ip,inet,loaded,mem,disk,docker,latency,
                  load_ok,mem_ok,disk_ok,latency_ok,alerts,sev,at,facts)
@@ -3052,6 +3070,7 @@ AI_CFG_FILE = os.path.join(DATA, "agents_ai.json")
 AI_PROBES = ["claude", "codex", "opencode", "gemini", "qwen", "aider"]
 _AI_STATE = {}          # host -> 上次派发时间戳(cooldown 去重)
 _AI_LOCK = threading.Lock()
+_HEAL_SEEN = {}         # host -> {「at:target」} 已记过事件的自愈条目, 防止重复刷日志
 
 _AI_DEFAULT = {
     "enabled": False,          # 默认关闭: AI 自动动服务器属不可逆操作, 需显式开启
@@ -19340,6 +19359,14 @@ async function ndAgentLoad(){
   rows.push(ndRow('systemd 服务',svc+' 运行中'));
   if(f.docker&&f.docker.ok)rows.push(ndRow('docker',(f.docker.count||0)+' 容器运行中'));
   else rows.push(ndRow('docker','未安装','mb8'));
+  // 自愈: 最近动作 / 停手对象 / 待人工看的记录
+  const h=f.heal||{};
+  const ha=(h.actions||[]), hb=(h.blocked||[]), hn=(h.notes||[]);
+  const okN=ha.filter(x=>x.ok).length, badN=ha.length-okN;
+  rows.push(ndRow('自愈',ha.length?`${okN} 成功 / ${badN} 失败`:'无动作',
+                  badN?'sev sev-warn':'sev sev-ok'));
+  if(hb.length)rows.push(ndRow('已停手',hb.join('、'),'sev sev-bad'));
+  if(hn.length)rows.push(ndRow('待人工',hn[hn.length-1].msg||'','mb8'));
  }else{
   // 老版本 agent 还没上报实况 -> 退回面板本机的智能体清单(仅本机有意义)
   try{const d=await (await fetch('/api/agents')).json();window._agents=d.list||[];
