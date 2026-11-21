@@ -14,7 +14,7 @@ General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-基于 / 借鉴 1Panel 社区版 (GPL-3.0) 改编，所有引用内容已按 GPL-3.0 保留版权声明。
+基于 / 借鉴 Fleet-Panel 社区版 (GPL-3.0) 改编，所有引用内容已按 GPL-3.0 保留版权声明。
 
 启动:  python3 app.py [--port 8ghz]
 依赖:  flask。数据落在 data/ 下 sqlite,前端走 / 的 SPA 页(无构建)。
@@ -275,7 +275,7 @@ def _container_networks(ids):
     return res
 
 def _split_ports(text):
-    """'0.0.0.0:8080->8080/tcp, :::8080->8080/tcp' -> 两个 chip(1Panel 也是分开显示 v4/v6)
+    """'0.0.0.0:8080->8080/tcp, :::8080->8080/tcp' -> 两个 chip(Fleet-Panel 也是分开显示 v4/v6)
     面板 /containers/container 端口列: 每个绑定一个 el-button, 不做 IPv6 去重。"""
     if not text:
         return []
@@ -684,13 +684,13 @@ def compose_down(name):
     return {"ok": ok, "error": "" if ok else out, "out": out[-300:]}
 
 # ---------- 站点 / 反向代理 / 应用部署 (C) ----------
-# 站点管理类比 1Panel「网站」模块: 类型 = 反向代理 | 静态 | 应用(runenv)
+# 站点管理类比 Fleet-Panel「网站」模块: 类型 = 反向代理 | 静态 | 应用(runenv)
 SITES_DIR = DATA + "/sites"; os.makedirs(SITES_DIR, exist_ok=True)
 CERTS_DIR = DATA + "/certs"   # 证书部署目录 (F 模块 deploy 产物), nginx_conf 用
 NGINX_RELOAD = os.environ.get("FLEET_NGINX_RELOAD", "")   # 若配了 host 侧 nginx reload 命令则用, 否则只存储
 NGINX_BIND   = os.environ.get("FLEET_NGINX_BIND", "")     # nginx 监听 IP; 留空则 0.0.0.0. 多 IP 机上建议绑专属 IP 避开其他 443 占用
 
-# 应用商店模板(1Panel 应用商店的迷你集, compose 模板)
+# 应用商店模板(Fleet-Panel 应用商店的迷你集, compose 模板)
 APP_TEMPLATES = {
   "nginx-hello": {"name": "Nginx 测试站点", "desc": "极简 nginx 示例站点", "icon": "🌐", "color": "#1f8c4d",
     "compose": 'services:\n  app:\n    image: nginx:alpine\n    ports:\n      - "8891:80"\n    restart: unless-stopped\n    networks: [pn]\nnetworks:\n  pn:\n    driver: bridge\n    ipam:\n      config:\n        - subnet: 172.250.1.0/24\n'},
@@ -1096,8 +1096,8 @@ def ssh_exec(h, cmd, timeout=60, pwd=None):
         return {"ok": False, "rc": -1, "out": f"ERR {e}"}
 
 def ssh_test(h, pwd=None):
-    r = ssh_exec(h, "echo 1panel-ok", timeout=15, pwd=pwd)
-    ok = r.get("rc") == 0 and "1panel-ok" in r.get("out", "")
+    r = ssh_exec(h, "echo fleet-panel-ok", timeout=15, pwd=pwd)
+    ok = r.get("rc") == 0 and "fleet-panel-ok" in r.get("out", "")
     return {"ok": ok, "msg": "连接成功" if ok else (r.get("out") or "连接失败").strip()[-300:]}
 
 def _host_view(h, keep_secret=False):
@@ -2210,11 +2210,11 @@ def _load_users():
     except Exception: return {"admin": {"pwd": "admin", "role": "admin"}}
 def _save_users(u): json.dump(u, open(USERS_FILE,"w"), ensure_ascii=False, indent=2)
 _LOG_LOCK = threading.Lock()
-# 集合名 -> 1Panel 操作日志资源(source)
+# 集合名 -> Fleet-Panel 操作日志资源(source)
 _COL_SRC = {"agents": "agents", "models": "model", "mcp": "xapp", "tpl": "xapp", "env": "runtimes",
             "app": "xapp", "sync": "sync", "skills": "skills-hub", "bench": "ai-benchmark", "tamper": "tampers"}
 
-# 1Panel 操作日志资源全表（顺序与官方一致）
+# Fleet-Panel 操作日志资源全表（顺序与官方一致）
 OP_SOURCES = [("", "所有"), ("dashboard", "概览"), ("apps", "应用"), ("custom", "自定义应用"),
   ("openresty", "OpenResty"), ("websites", "网站"), ("monitor", "网站监控"), ("runtimes", "运行环境"),
   ("ai", "AI"), ("agents", "智能体"), ("model", "模型下载"), ("vllm", "vLLM"),
@@ -2230,7 +2230,7 @@ OP_SOURCES = [("", "所有"), ("dashboard", "概览"), ("apps", "应用"), ("cus
 _OP_SRC_LABEL = dict(OP_SOURCES)
 
 def _client_geo():
-    """登录 IP / 归属地（1Panel login_logs 的 ip + address 两列）。"""
+    """登录 IP / 归属地（Fleet-Panel login_logs 的 ip + address 两列）。"""
     ip = (request.headers.get("X-Real-IP") or request.headers.get("X-Forwarded-For")
           or request.remote_addr or "").split(",")[0].strip()
     if ip.startswith("::ffff:"): ip = ip[7:]
@@ -2243,7 +2243,7 @@ def _client_agent():
     return (request.headers.get("User-Agent") or "")[:512]
 
 def _op_log(source, operate, user=None, status="Success", detail_zh="", detail_en="", message=""):
-    """操作日志一行（对应 1Panel operation_logs: source/operate/user/node/status/detail_zh/detail_en/message）。"""
+    """操作日志一行（对应 Fleet-Panel operation_logs: source/operate/user/node/status/detail_zh/detail_en/message）。"""
     if user is None:
         try: user = _session_user(request.headers) or "admin"
         except Exception: user = "admin"
@@ -2271,7 +2271,7 @@ def _login_log(user, status="Success", message=""):
         c.commit()
 
 def _audit(level, who, msg, source="settings", operate="edit", detail_en="", message=""):
-    """兼容旧调用：写入 1Panel 风格的 operation_logs（失败级别记 Failed）。"""
+    """兼容旧调用：写入 Fleet-Panel 风格的 operation_logs（失败级别记 Failed）。"""
     st = "Failed" if level in ("warn", "err", "error") else "Success"
     _op_log(source, operate, user=who, status=st, detail_zh=msg, detail_en=detail_en, message=message)
 
@@ -5151,10 +5151,10 @@ def make_app():
     _UIF = os.path.join(DATA, "ui.json")
     _UI_DEFAULT = {"primary": "#005eeb", "bgtype": "图片", "bgcolor": "#005eeb", "logo": "", "logoshort": "", "favicon": "",
                    "loginimg": "", "loginbg": "",
-                   "footer": {"biz": {"show": True, "url": "https://www.fit2cloud.com/1panel/"},
+                   "footer": {"biz": {"show": True, "url": "https://www.fit2cloud.com/fleet-panel/"},
                               "forum": {"show": True, "url": "https://bbs.fit2cloud.com/c/1p/7"},
-                              "manual": {"show": True, "url": "https://1panel.cn/docs/"},
-                              "repo": {"show": True, "url": "https://github.com/1Panel-dev/1Panel"}},
+                              "manual": {"show": True, "url": "https://fleet-panel.cn/docs/"},
+                              "repo": {"show": True, "url": "https://github.com/Fleet-Panel-dev/Fleet-Panel"}},
                    "appdir": "/opt/1panel/resource/apps/local", "appsrc": "官方源 (apps.fit2cloud.com)"}
     _UI_FOOT_KEYS = ("biz", "forum", "manual", "repo")
     def _ui():
@@ -7442,7 +7442,7 @@ def make_app():
 
     @app.post("/api/audit")
     def api_audit():
-        """操作日志：{operation,page,pageSize,status,source,node} -> {items,total}（同 1Panel /core/logs/operation）"""
+        """操作日志：{operation,page,pageSize,status,source,node} -> {items,total}（同 Fleet-Panel /core/logs/operation）"""
         if not need_auth(): return jsonify({"error":"unauth"}), 401
         _ensure_log_tables()
         d = request.get_json(force=True, silent=True) or {}
@@ -7471,7 +7471,7 @@ def make_app():
 
     @app.post("/api/audit/clean")
     def api_audit_clean():
-        """清空日志：{logType:'operation'|'login'}（同 1Panel /core/logs/clean）"""
+        """清空日志：{logType:'operation'|'login'}（同 Fleet-Panel /core/logs/clean）"""
         if not need_auth(): return jsonify({"error":"unauth"}), 401
         _ensure_log_tables()
         lt = (request.get_json(force=True, silent=True) or {}).get("logType") or "operation"
@@ -7498,7 +7498,7 @@ def make_app():
 
     @app.post("/api/loginlog")
     def api_loginlog():
-        """访问日志：{info,status,page,pageSize} -> {items,total}（同 1Panel /core/logs/login）"""
+        """访问日志：{info,status,page,pageSize} -> {items,total}（同 Fleet-Panel /core/logs/login）"""
         if not need_auth(): return jsonify({"error":"unauth"}), 401
         _ensure_log_tables()
         d = request.get_json(force=True, silent=True) or {}
@@ -7536,7 +7536,7 @@ def make_app():
 
     @app.post("/api/loginlog/export")
     def api_loginlog_export():
-        """SSH 登录日志导出（csv 附件，列 = 1Panel 导出列：地址/归属/端口/登录方式/用户/状态/时间）。"""
+        """SSH 登录日志导出（csv 附件，列 = Fleet-Panel 导出列：地址/归属/端口/登录方式/用户/状态/时间）。"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
         _ensure_log_tables()
         d = request.get_json(silent=True) or {}
@@ -7560,7 +7560,7 @@ def make_app():
     _SYS_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
     def _syslog_rows():
-        """系统日志(主机日志)：面板事件 + systemd journal，字段对齐 1Panel /logs/host-system"""
+        """系统日志(主机日志)：面板事件 + systemd journal，字段对齐 Fleet-Panel /logs/host-system"""
         out = []
         try:
             since = open(os.path.join(DATA, "syslog_cleared.json")).read().strip()
@@ -7721,7 +7721,7 @@ def make_app():
             return jsonify({"ok": True, "items": rows[(page - 1) * size: page * size], "total": len(rows)})
         return jsonify({"ok": True, "items": [], "total": 0})
 
-    # ---- 主机日志（1Panel /logs/operation … /logs/website） ----
+    # ---- 主机日志（Fleet-Panel /logs/operation … /logs/website） ----
     def _hl_events():
         try:
             return db().execute("SELECT at,host,level,msg FROM events ORDER BY id DESC LIMIT 5000").fetchall()
@@ -7744,7 +7744,7 @@ def make_app():
 
     @app.get("/api/logs/system/files")
     def api_logs_system_files():
-        """系统日志文件列表（1Panel /logs/system/files）"""
+        """系统日志文件列表（Fleet-Panel /logs/system/files）"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
         names = []
         for d in ("/var/log",):
@@ -7810,14 +7810,14 @@ def make_app():
 
     @app.get("/api/logs/system/status")
     def api_logs_system_status():
-        """主机日志状态（1Panel /logs/system/status）"""
+        """主机日志状态（Fleet-Panel /logs/system/status）"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
         return jsonify({"source": "journalctl", "version": _hl_jver(),
                         "keywordFilterSupported": True, "message": ""})
 
     @app.get("/api/logs/system/services")
     def api_logs_system_services():
-        """主机日志服务下拉（1Panel /logs/system/services）"""
+        """主机日志服务下拉（Fleet-Panel /logs/system/services）"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
         running, allu = _hl_units()
         return jsonify({"items": [x for x in allu if x in set(running)]})
@@ -7839,7 +7839,7 @@ def make_app():
 
     @app.post("/api/logs/system/read")
     def api_logs_system_read():
-        """主机日志读取（1Panel /logs/system/read）：journald 游标分页，最新在前。
+        """主机日志读取（Fleet-Panel /logs/system/read）：journald 游标分页，最新在前。
         旧版按文件名读取仍然保留（body 携带 name）。"""
         if not need_auth(): return jsonify({"error": "unauth"}), 401
         body = request.get_json(silent=True) or {}
@@ -7917,7 +7917,7 @@ def make_app():
 
     @app.get("/api/logs/panel")
     def api_logs_panel():
-        """面板服务：各组件状态 + 面板自身事件（对应 1Panel /logs/system/status + /logs/system/read）"""
+        """面板服务：各组件状态 + 面板自身事件（对应 Fleet-Panel /logs/system/status + /logs/system/read）"""
         def _up(name, cmd):
             try:
                 import subprocess
@@ -8084,7 +8084,7 @@ def make_app():
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
 
-    # ---- 操作日志自动记录（同 1Panel 对写接口按资源记 operation_logs） ----
+    # ---- 操作日志自动记录（同 Fleet-Panel 对写接口按资源记 operation_logs） ----
     _OP_MAP = [
         (r"^/api/audit/(clean|clear)$", "logs"), (r"^/api/loginlog", "logs"),
         (r"^/api/users", "users"), (r"^/api/alert", "alert"), (r"^/api/agents", "agents"),
@@ -8169,7 +8169,7 @@ def make_app():
             try: return pwd.getpwuid(uid).pw_name
             except: return str(uid)
 
-        # CPU%: ps 两次采样取差值(1Panel 同样用动态采样)
+        # CPU%: ps 两次采样取差值(Fleet-Panel 同样用动态采样)
         cpu_map, conn_map = {}, {}
         caps, conns_cache = {}, {}
         try:
@@ -8252,7 +8252,7 @@ def make_app():
 
     @app.get("/api/disk")
     def api_disk():
-        """磁盘管理: 按物理磁盘分卡, 每卡一张分区表 (对齐 1Panel v2.4.2 系统/磁盘管理)."""
+        """磁盘管理: 按物理磁盘分卡, 每卡一张分区表 (对齐 Fleet-Panel v2.4.2 系统/磁盘管理)."""
         import subprocess as sp
         import json as _j
         out = {"disks": []}
@@ -9513,7 +9513,7 @@ def make_app():
     return app
 
 HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1"><title>1Panel</title>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Fleet-Panel</title>
 <link rel="icon" href="/favicon.ico" type="image/x-icon">
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
@@ -9873,7 +9873,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  /* ===== 容器模块  ===== */
  .ck-pane .card{margin-bottom:7px}
  .ck-pane .tblscroll{overflow-x:auto;overflow-y:auto;scrollbar-width:thin}
- /* 容器/列表卡片高度对齐 1Panel: 卡片高 = 100vh - 159px (900px 视口实测 741px), 表体内部滚动 */
+ /* 容器/列表卡片高度对齐 Fleet-Panel: 卡片高 = 100vh - 159px (900px 视口实测 741px), 表体内部滚动 */
  #ck-pane-container:has(>.card.pane)>.card.content-container__search{flex:none}
  #ck-pane-container>.card.pane{display:flex;flex-direction:column;box-sizing:border-box;height:calc(100vh - 159px);max-height:calc(100vh - 159px)}
  #ck-pane-container>.card.pane>.body{flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column}
@@ -9892,7 +9892,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  #files>.card.pane>.body>.pager,#proc>.card.pane>.body>.pager,#firewall>.card.pane>.body>.pager{margin-top:auto;flex:none;height:32px;box-sizing:border-box;padding:20px 0 0;align-items:center}
  #files>.card.pane>.body>.pager .ph,#proc>.card.pane>.body>.pager .ph,#firewall>.card.pane>.body>.pager .ph{margin-top:-20px}
  #files>.card.pane>.body>table{table-layout:fixed;width:100%}
- /* 1Panel 文件管理: 卡片无标题头, 正文 20px 内边距, 顶部路径栏 32px + 表格 */
+ /* Fleet-Panel 文件管理: 卡片无标题头, 正文 20px 内边距, 顶部路径栏 32px + 表格 */
  #files>.card.pane>.body>.fbar{flex:none;height:32px;margin-bottom:12px;display:flex;align-items:center}
  #files>.card.pane>.body>.lscroll>table>thead th:first-child,#files>.card.pane>.body>.lscroll>table>tbody td:first-child{padding-left:0}
  #files>.card.pane>.body>.fops{flex:none;margin-top:12px}
@@ -9936,7 +9936,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .fctx div.danger:hover{color:#f56c6c}
  .fctx .fsepline{height:1px;background:#ebeef5;margin:4px 0;padding:0}
  #files>.card.pane>.body>table>thead th{position:sticky;top:0;z-index:2;background:var(--card,#1b1d24)}
- /* 无顶栏页: 列表卡片按视口高度铺满 (对齐 1Panel .app-main 滚动) */
+ /* 无顶栏页: 列表卡片按视口高度铺满 (对齐 Fleet-Panel .app-main 滚动) */
  @media screen{.content>.view>.card.pane:not(.router_card):not(.nd-stat):not(.nd-grid .card){height:calc(100vh - 14px)}}
  #docker>.router_card{margin-bottom:7px}
  #ck-pane-container>.card.content-container__search{margin-bottom:10px}
@@ -9976,7 +9976,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .ck-drawer .ft{padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:10px}
  .ck-drawer .row{margin-bottom:16px}
  .ck-mask{position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:3000}
- /* ===== 1Panel el-drawer / el-message-box / el-message 复刻 ===== */
+ /* ===== Fleet-Panel el-drawer / el-message-box / el-message 复刻 ===== */
  .fp-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:3000}
  .fp-drawer{position:fixed;top:0;right:0;bottom:0;width:50%;min-width:520px;background:#fff;z-index:3001;
   display:flex;flex-direction:column;box-shadow:-6px 0 16px rgba(0,0,0,.08)}
@@ -10324,7 +10324,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .sites-page .el-table-st.sites-tbl td.s-ops .cell a:last-child{margin-right:0}
  .sites-page .el-table__empty-block{display:flex;align-items:center;justify-content:center;width:100%;min-height:120px;color:var(--text3);font-size:14px}
  .sites-page .el-table__empty-text{line-height:48px}
-/* 卡片视图: 复刻 1Panel ComplexTable card 模式 */
+/* 卡片视图: 复刻 Fleet-Panel ComplexTable card 模式 */
  .sites-page .complex-table.card-mode .complex-table__tablewrap{display:none;flex:none}
  .sites-page .complex-table__card-grid{display:none;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-content:start;box-sizing:border-box;width:100%;padding:12px;overflow-y:auto;flex:1 1 auto;min-height:0}
  .sites-page .complex-table.card-mode .complex-table__card-grid{display:grid}
@@ -10423,7 +10423,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .el-select .el-select__wrapper{position:relative;display:flex;align-items:center;box-sizing:border-box;width:100%;height:32px;padding:4px 12px;background:#fff;border-radius:4px;box-shadow:0 0 0 1px var(--el-border-color,#dcdfe6) inset;cursor:pointer}
  .el-select .el-select__wrapper:hover{box-shadow:0 0 0 1px var(--el-border-color-hover,#c0c4cc) inset}
  .el-select .el-select__prefix{padding:0;margin-right:6px;font-size:14px;line-height:24px;color:var(--el-text-color-placeholder,#a8abb2);white-space:nowrap;flex:none}
- /* 1Panel el-select: 占位前缀只占 label 宽度, 选择后值紧贴其右侧显示 */
+ /* Fleet-Panel el-select: 占位前缀只占 label 宽度, 选择后值紧贴其右侧显示 */
  .el-select .el-select__prefix.placeholder{flex:0 0 auto;width:36px;padding:0 9px;margin-right:0}
  .el-select .el-select__prefix.placeholder+.el-select__native{flex:1 1 0;width:0;min-width:0;padding-left:8px;padding-right:43px}
  .el-select .el-select__native{flex:1;min-width:0;width:100%;height:24px;border:none;outline:none;box-shadow:none;background:transparent;font-size:14px;line-height:24px;color:var(--el-text-color-regular,#606266);appearance:none;-webkit-appearance:none;cursor:pointer;padding:0}
@@ -10563,7 +10563,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
   font-size:12px;padding:10px 20px;display:flex;align-items:center;gap:8px;margin:14px -20px -7px}
  .panel-footer a{color:var(--primary);margin:0 2px}
  .panel-footer .ff{flex:1;display:flex;gap:8px;align-items:center}
- /* ===== 页脚 (1Panel Pro 页脚) ===== */
+ /* ===== 页脚 (Fleet-Panel Pro 页脚) ===== */
  .app-footer{flex:0 0 48px;height:48px;border-top:1px solid var(--panel-footer-border);background:var(--panel-footer-bg);padding:0 20px;box-sizing:border-box;display:flex;align-items:center}
  .footer-content{width:100%;display:flex;flex-wrap:nowrap;justify-content:flex-start;gap:0;align-items:center;min-height:28px}
  .footer-copyright{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;color:var(--text3);font-size:12px}
@@ -10751,7 +10751,7 @@ HTML = r"""<!doctype html><html lang=zh><head><meta charset=utf-8>
  .el-switch.is-checked .el-switch__core::after{left:22px}
  .usage-chart-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px}
  .setting-actions{margin-top:24px;padding-top:16px;border-top:1px solid var(--border,#dcdfe6)}
-/* ===== 主机日志 (1Panel /logs/host) ===== */
+/* ===== 主机日志 (Fleet-Panel /logs/host) ===== */
 #hl-panel,#audit #lg-host{display:flex;flex-direction:column;width:100%;box-sizing:border-box;flex:1 1 auto;min-height:0;margin-top:0;margin-bottom:0}
 #audit #lg-host.card.pane{border:0;box-shadow:none;background:transparent;padding:0;border-radius:0}
 #hl-panel>.content-container__title{flex:none}
@@ -11006,7 +11006,7 @@ html[data-fleet-theme="dark"] #hl-panel .el-alert--info.is-light,html[data-fleet
 #hl-panel .el-switch.is-checked .el-switch__core::after,#audit #lg-host .el-switch.is-checked .el-switch__core::after{left:22px}
 #hl-panel .el-switch__label,#audit #lg-host .el-switch__label{font-size:14px;color:#606266;white-space:nowrap}
 #hl-panel #hls-site-sel,#audit #lg-host #hls-site-sel{width:200px}
-/* ===== 终端页 (1Panel /terminal 克隆) ===== */
+/* ===== 终端页 (Fleet-Panel /terminal 克隆) ===== */
 .router_card{margin-bottom:16px}
 .router_card>div{display:inline-flex}
 .mk-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
@@ -11456,7 +11456,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
  #audit .lg-dlg-label{width:80px;flex:none;text-align:right;padding-right:12px;color:#606266;font-size:14px}
  #audit .lg-select-wrap{position:relative;display:inline-block;width:200px;flex:none}
  #audit .lg-select-wrap .el-select__wrapper{width:200px}
- /* ===== 用户管理 (1Panel) ===== */
+ /* ===== 用户管理 (Fleet-Panel) ===== */
  #users .u-router{margin-bottom:0}
  #users .u-alert{position:relative;overflow:hidden;margin:12px 0 10px;padding:8px 16px;background:#fdf6ec;border-radius:4px;color:#e6a23c;font-size:13px;line-height:24px;box-sizing:border-box}
  #users .u-alert .u-alert-txt{font-size:13px;line-height:24px;color:#e6a23c}
@@ -11623,7 +11623,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
 </style><link rel="stylesheet" href="/static/vendor/mdeditor.css">
 <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 <style>
-/* fleet 覆盖:1Panel memo-content 规则在其后生效 */
+/* fleet 覆盖:Fleet-Panel memo-content 规则在其后生效 */
 </style></head><body>
 <div id="loginov" class="loginov"><div class="login-bg"></div><div class="login-panel"><div class="lp-login">
 <div class="lp-left"></div>
@@ -11633,7 +11633,7 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
 <input id="lp-pass" class="ipt" type="password" placeholder="密码" autocomplete="current-password" style="width:100%;margin-top:12px">
 <div id="lp-err" class="lp-err"></div>
 <button class="btn lp-btn" onclick="lpLogin()">登录</button>
-<div class="lp-demo">用户名:demo 密码:1panel </div>
+<div class="lp-demo">用户名:demo 密码:fleet-panel </div>
 <label class="lp-agree"><input type="checkbox" checked><span>同意 <a class="agree" href="https://www.fit2cloud.com/legal/licenses.html" target="_blank">《飞致云社区软件许可协议》</a></span></label>
 </div>
 </div></div></div></div>
@@ -12249,8 +12249,8 @@ html[data-fleet-theme="dark"] .term-overlay{background:rgba(46,49,61,.8)}
         <div class="el-form-item el-form-item--label-left"><label class="el-form-item__label" style="width:150px">字体集</label><div class="el-form-item__content"><div class="el-select term-fonts" id="tc-fonts"><input class="term-fonts-input" id="tc-fontin" placeholder="选择或输入字体后回车" onkeydown="if(event.key==='Enter'){event.preventDefault();termFontAdd();}"><div class="term-tags" id="tc-tags"></div></div><span class="input-help">选择或输入字体，是否生效取决于浏览器所在系统是否已安装该字体，未安装会自动回退，为空则使用默认字体</span></div></div>
         <div class="el-form-item el-form-item--label-left"><label class="el-form-item__label" style="width:150px">背景色</label><div class="el-form-item__content"><input type="color" class="term-color" id="tc-bg" value="#000000" oninput="termPreview()"></div></div>
         <div class="el-form-item el-form-item--label-left"><label class="el-form-item__label" style="width:150px">前景色</label><div class="el-form-item__content"><input type="color" class="term-color" id="tc-fg" value="#f5f5f5" oninput="termPreview()"></div></div>
-        <div class="el-form-item el-form-item--label-left"><div class="el-form-item__content" style="margin-left:150px"><div class="term-preview" id="tc-prev"><pre id="tc-prevpre">$ echo 1panel
-1panel
+        <div class="el-form-item el-form-item--label-left"><div class="el-form-item__content" style="margin-left:150px"><div class="term-preview" id="tc-prev"><pre id="tc-prevpre">$ echo fleet-panel
+fleet-panel
 $ df -h
 Filesystem      Size  Used Avail Use% Mounted on
 /dev/sda1        40G   12G   26G  32% /</pre></div></div></div>
@@ -13109,7 +13109,7 @@ Filesystem      Size  Used Avail Use% Mounted on
     </div></div>
     <div id="wmon-pane">
     <div class="el-alert warn" id="wmon-alert"><span>⚠️</span><div>当前网站监控未开启，<a class="btn link" onclick="wmEnable()">立即开启</a></div></div>
-    <div class="card pane"><div class="head"><h2>今日状态 <small>static.1panel.com</small></h2></div>
+    <div class="card pane"><div class="head"><h2>今日状态 <small>static.fleet-panel.com</small></h2></div>
      <div class="body nd-grid-nostyle" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;color:var(--text2)">
       <div><b class="nd-num">0</b><div>浏览量</div></div><div><b class="nd-num">0</b><div>访客数</div></div><div><b class="nd-num">0</b><div>独立 IP</div></div><div><b class="nd-num">0 B</b><div>流量</div></div><div><b class="nd-num">0</b><div>蜘蛛</div></div><div><b class="nd-num">0</b><div>请求数</div></div><div><b class="nd-num">0</b><div>4xx 数量</div></div><div><b class="nd-num">0</b><div>5xx 数量</div></div>
      </div></div>
@@ -13166,7 +13166,7 @@ Filesystem      Size  Used Avail Use% Mounted on
     </div><div class="flex flex-col gap-2 sm:flex-row"></div></div></div></div>
     <div class="card pane" id="kvm-env">
      <div class="body" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 16px">
-      <span class="el-tag el-tag--success el-tag--dark" id="kvm-envtag">1Panel-kvm</span>
+      <span class="el-tag el-tag--success el-tag--dark" id="kvm-envtag">Fleet-Panel-kvm</span>
       <span class="el-divider el-divider--vertical"></span>
       <a class="btn link" onclick="kvmDep()">⚠ 依赖</a>
       <span style="color:var(--text3);font-size:12px" id="kvm-envmsg"></span>
@@ -13442,7 +13442,7 @@ Filesystem      Size  Used Avail Use% Mounted on
          <div class="settings-form">
           <div class="u-fi"><div class="u-label req">是否开启</div><div class="u-ctl"><span class="u-switch" id="auth-enable" onclick="this.classList.toggle('is-on')"></span></div></div>
           <div class="u-fi"><div class="u-label req">服务端地址</div><div class="u-ctl"><input class="u-input" id="auth-server" placeholder="ldap://ldap.example.com:389"><span class="input-help">支持 ldap:// 和 ldaps:// 地址。</span></div></div>
-          <div class="u-fi"><div class="u-label req">绑定 DN</div><div class="u-ctl"><input class="u-input" id="auth-binddn" placeholder="cn=svc-1panel,ou=services,dc=example,dc=com"></div></div>
+          <div class="u-fi"><div class="u-label req">绑定 DN</div><div class="u-ctl"><input class="u-input" id="auth-binddn" placeholder="cn=svc-fleet-panel,ou=services,dc=example,dc=com"></div></div>
           <div class="u-fi"><div class="u-label req">密码</div><div class="u-ctl"><input class="u-input" id="auth-bindpwd" type="password" placeholder="留空表示沿用已保存密码"></div></div>
          </div>
         </section>
@@ -15258,7 +15258,7 @@ function monload(){
  }).catch(()=>{const el=document.getElementById('mon-c-cpu');if(el)el.innerHTML='<div style="text-align:center;margin-top:110px;color:var(--text3)">监控数据加载失败</div>';});
 }
 function sshSetItem(k,cur){sshEditDirective(k,cur==='-'?'':cur);}
-/* ===== 主机日志（1Panel /logs/operation … /logs/website 的容器页） ===== */
+/* ===== 主机日志（Fleet-Panel /logs/operation … /logs/website 的容器页） ===== */
 var HL_TAB='host',HL_PAGES={},HL_TABNAME={service:'面板服务',host:'主机日志',wlog:'登录日志',website:'网站日志'};
 function hostlogTab(t){
  let p=HL_PAGES[t];
@@ -15278,7 +15278,7 @@ window.addEventListener('load',hlAttach);
 function _hlAlert(txt,extra){
  return '<div class="el-alert el-alert--info is-light"><div class="el-alert__content"><span class="el-alert__title">'+txt+'</span></div></div>'+(extra||'');
 }
-/* ---- 1Panel LogFile 组件（非流式模式）：Download 工具栏 + 代码框 + 固定底栏 ---- */
+/* ---- Fleet-Panel LogFile 组件（非流式模式）：Download 工具栏 + 代码框 + 固定底栏 ---- */
 function hlLogFile(id,w,fetchFn){
  const html='<div class="hl-logfile" id="'+id+'">'
   +'<div class="hl-logfile__top"><div class="hl-logfile__ops"><button type="button" class="el-button el-button--default el-button--small" onclick="hlDownload(\''+id+'\')"><i class="el-icon"><svg viewBox="0 0 1024 1024"><path fill="currentColor" d="M505.7 661a8 8 0 0 0 12.6 0l112-141.7c4.1-5.2.4-12.9-6.3-12.9h-74.1V168c0-4.4-3.6-8-8-8h-60c-4.4 0-8 3.6-8 8v338.3H400c-6.7 0-10.4 7.7-6.3 12.9l112 141.8zM878 626h-60c-4.4 0-8 3.6-8 8v154H214V634c0-4.4-3.6-8-8-8h-60c-4.4 0-8 3.6-8 8v198c0 17.7 14.3 32 32 32h684c17.7 0 32-14.3 32-32V634c0-4.4-3.6-8-8-8z"></path></svg></i><span>下载</span></button></div>'
@@ -15408,7 +15408,7 @@ HL_PAGES.service.build=function(){
 HL_PAGES.service.init=function(){svcLoad();};
 function svcTable(p,st){
  const s=st||{}, rows=[
-  ['1Panel','fleet-panel',s.panel||'-','-'],
+  ['Fleet-Panel','fleet-panel',s.panel||'-','-'],
   ['Agent','fleet-agent',s.agent||'未安装','-'],
   ['Docker','docker',s.docker||'-','-'],
   ['Nginx','fleet-nginx',s.nginx||'-','-']
@@ -16365,7 +16365,7 @@ async function ovload(){
    <button type="button" class="el-button h-app-button installed" onclick="show('docker')"><span class="">管理</span></button>
   </div>`).join('');
  const avail=[
-  ["1Panel AI 网关","企业级 AI 统一接入与治理平台"],
+  ["Fleet-Panel AI 网关","企业级 AI 统一接入与治理平台"],
   ["MaxKB","强大易用的企业级智能体平台"],
   ["DeepSeek Harness","DeepSeek 开源智能体开发环境"],
  ].map(([t,ds])=>`
@@ -16851,7 +16851,7 @@ function ckSize(){toast('正在获取容器大小…');_ckPost('/api/docker/size
  dload();});}
 document.addEventListener('click',()=>document.querySelectorAll('.ck-menu.on').forEach(x=>x.classList.remove('on')));
 
-/* ===== 1Panel 风格 message-box / drawer (容器 > 更多 的二级交互) ===== */
+/* ===== Fleet-Panel 风格 message-box / drawer (容器 > 更多 的二级交互) ===== */
 function fpConfirm(msg,title,okText){
  return new Promise(res=>{
   document.querySelectorAll('.fp-mask,.fp-msgbox').forEach(x=>x.remove());
@@ -16898,7 +16898,7 @@ const _ICON_BACK='<svg viewBox="0 0 1024 1024" width="14" height="14"><path fill
 const _ICON_CLOSE='<svg viewBox="0 0 1024 1024" width="16" height="16"><path fill="currentColor" d="M764.288 214.592 512 466.88 259.712 214.592a31.936 31.936 0 0 0-45.12 45.12L466.752 512 214.592 764.288a31.936 31.936 0 1 0 45.12 45.12L512 557.248l252.288 252.16a31.936 31.936 0 0 0 45.12-45.12L557.248 512l252.16-252.288a31.936 31.936 0 1 0-45.12-45.12z"/></svg>';
 const _ICON_HOME='<svg viewBox="0 0 1024 1024" width="14" height="14"><path fill="currentColor" d="M512 128 128 447.936V896h255.936V640H640v256h255.936V447.936z"/></svg>';
 
-/* ---- 更多 > 目录 (容器内文件浏览, 对齐 1Panel 目录 drawer) ---- */
+/* ---- 更多 > 目录 (容器内文件浏览, 对齐 Fleet-Panel 目录 drawer) ---- */
 function _fsize(n){if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<u.length-1);return (Math.round(n*10)/10)+' '+u[i];}
 function _dpath(join){const p=(document.getElementById('dd-path')||{}).value||'/';if(!join)return p;
  if(join=='..'){const a=p.split('/').filter(Boolean);a.pop();return '/'+a.join('/');}
@@ -17092,7 +17092,7 @@ function sSiteRow(x){
    ${C('',x.expire||'-')}${C('',x.cert_expire||'-')}${C('',sfEsc(x.remark||x.domain||'-'))}
    <td class="el-table__cell s-ops"><div class="cell">${x.enabled?`<a onclick="stgl('${x.name}','disable')">停用</a>`:`<a onclick="stgl('${x.name}','enable')">启用</a>`} <a onclick="sed('${x.name}')">设置</a> <a onclick="sDelete('${x.name}')">删除</a></div></td></tr>`;
 }
-/* 批量选择下拉: 复刻 1Panel jsb 多选(复选框 + 请选择/已选择) */
+/* 批量选择下拉: 复刻 Fleet-Panel jsb 多选(复选框 + 请选择/已选择) */
 const JSK_SEL='M795.264 251.072 512 539.392 228.736 251.072a29.12 29.12 0 0 0-41.6 0 30.592 30.592 0 0 0 0 42.752L489.664 601.088a32 32 0 0 0 44.672 0l302.656-307.264a30.592 30.592 0 0 0 0-42.752 29.12 29.12 0 0 0-41.728 0z';
 const JSB={open:false,val:[]};
 function jsbRender(){
@@ -17118,7 +17118,7 @@ function sBatch(){
   for(const n of ids){try{await fetch('/api/sites/'+n+'/enable',{method:'POST',headers:{'X-Fleet-Token':TOK}});}catch(e){}}
   fpToast('批量操作完成');jsbClear();sload();});
 }
-/* ---- 网站 分页/批量选择: 复刻 1Panel ComplexTable + ElPagination ---- */
+/* ---- 网站 分页/批量选择: 复刻 Fleet-Panel ComplexTable + ElPagination ---- */
 const SPG={page:1,size:20,list:[],all:[]};
 const S_CHEV='M240.064 292.256a29.312 29.312 0 0 1 41.472 0L512 522.816l230.464-230.56a29.312 29.312 0 0 1 41.472 41.472L532.736 585.92a29.312 29.312 0 0 1-41.472 0L240.064 333.728a29.312 29.312 0 0 1 0-41.472z';
 const S_PREV='M609.408 149.376 277.76 489.6a32 32 0 0 0 0 44.672l331.648 340.352a29.12 29.12 0 0 0 41.728 0 30.592 30.592 0 0 0 0-42.752L339.264 511.936l311.872-319.872a30.592 30.592 0 0 0 0-42.688 29.12 29.12 0 0 0-41.728 0z';
@@ -17495,7 +17495,7 @@ async function deployTpl(k,safe){
   alert(d.ok?'部署成功：app-'+safe:'失败: '+(d.error||''));
   storeLoad(STORE.tab);
  }catch(e){alert('部署失败: '+(e&&e.message||e));}}
-// ---- 终端 (1Panel /terminal 克隆: 终端 / 主机 / 快速命令 / 配置) ----
+// ---- 终端 (Fleet-Panel /terminal 克隆: 终端 / 主机 / 快速命令 / 配置) ----
 const TCFG_DEF={lineHeight:1.2,letterSpacing:0,fontSize:12,fontFamily:["Monaco","Menlo","Consolas","Courier New","monospace"],background:"#000000",foreground:"#f5f5f5",defaultConnect:true,quickEntry:true};
 const T_FONTS=["Monaco","Menlo","Consolas","Courier New","monospace","Monospace","Courier","Andale Mono","Lucida Console","DejaVu Sans Mono","Ubuntu Mono","Source Code Pro","Fira Code","JetBrains Mono","Cascadia Code"];
 const TERM={init:false,tab:'terminal',hosts:[],groups:[],cmds:[],cfg:{...TCFG_DEF},wins:[],cur:null,hSel:new Set(),cSel:new Set()};
@@ -21205,7 +21205,7 @@ function kvmload(){
  kvmBinds();
  fetch('/api/kvm').then(function(r){return r.json()}).then(function(d){
   KVM.data=d;var em=document.getElementById('kvm-envmsg');if(em)em.textContent=(d.uri||'')+(d.qemu?' · '+d.qemu:' · 未安装 qemu');
-  var tag=document.getElementById('kvm-envtag');if(tag)tag.textContent='1Panel-kvm';
+  var tag=document.getElementById('kvm-envtag');if(tag)tag.textContent='Fleet-Panel-kvm';
   var pr=document.getElementById('kvm-prompt');
   if(pr){if(d.ok)pr.style.display='none';else{pr.style.display='';pr.querySelector('div').innerHTML='未检测到可用的 KVM 硬件虚拟化能力。'+(d.hw?'':' CPU 无 vmx/svm')+(d.dev?'':' · 未挂载 /dev/kvm')+(d.virsh?'':' · 未安装 libvirt')+(d.lib_ok?'':' · libvirt 连接失败');}}
   kvmTab();
