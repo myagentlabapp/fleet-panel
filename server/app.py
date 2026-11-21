@@ -2396,8 +2396,8 @@ def auth_test(mode="conn", user="", pwd=""):
 ALERT_FILE = DATA + "/alert.json"
 def _load_alert():
     if not os.path.exists(ALERT_FILE):
-        a = {"thresholds": dict(THRESH), "channels": {"webhook": NOTIFY["webhook"], "mail": NOTIFY["mail"]},
-             "enabled": {"webhook": bool(NOTIFY["webhook"]), "mail": bool(NOTIFY["mail"])}}
+        a = {"thresholds": dict(THRESH), "channels": {"webhook": NOTIFY["webhook"], "mattermost": "", "mail": NOTIFY["mail"]},
+             "enabled": {"webhook": bool(NOTIFY["webhook"]), "mattermost": False, "mail": bool(NOTIFY["mail"])}}
         _save_alert(a); return a
     try: return json.load(open(ALERT_FILE))
     except Exception: return {"thresholds": dict(THRESH), "channels": {}, "enabled": {}}
@@ -2412,8 +2412,16 @@ def alert_set(patch):
     _save_alert(a); _audit("info", "admin", "更新告警通知配置", source="alert", operate="edit", detail_en="Update alert notification"); return {"ok": True, "alert": a}
 
 def _send_chan(chan, cfg, sev, host, msg):
-    """通知插件: webhook / dingtalk / wechat(企业微信) / mail。返回 ok,err。"""
+    """通知插件: webhook / mattermost / dingtalk / wechat(企业微信) / mail。返回 ok,err。"""
     text = f"[{sev}] {host}: {msg}"
+    if chan == "mattermost" and cfg:
+        # Mattermost Incoming Webhook 原生态 payload
+        try:
+            import urllib.request
+            urllib.request.urlopen(urllib.request.Request(cfg, data=json.dumps({"text": text}).encode(),
+                headers={"Content-Type": "application/json"}), timeout=6).read()
+            return True, ""
+        except Exception as e: return False, str(e)
     if chan == "webhook" and cfg:
         try:
             import urllib.request
@@ -12636,6 +12644,13 @@ Filesystem      Size  Used Avail Use% Mounted on
         </div>
        </div>
        <div class="el-form-item">
+        <div class="el-form-item__label">Mattermost</div>
+        <div class="el-form-item__content">
+         <input id=amm class="ipt" style="flex:1;min-width:220px;max-width:520px" placeholder="http://chat.myagentlab.internal/hooks/xxx">
+         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2)"><input type=checkbox id=ammon> 启用</label>
+        </div>
+       </div>
+       <div class="el-form-item">
         <div class="el-form-item__label">邮件</div>
         <div class="el-form-item__content">
          <input id=amail class="ipt" style="flex:1;min-width:200px;max-width:520px" placeholder="smtp://u:p@h:port?to=a@b">
@@ -18862,11 +18877,12 @@ async function aload(){const r=await fetch('/api/alert');const d=await r.json();
  document.getElementById('ad').value=t.disk||85;document.getElementById('alat').value=t.latency_ms||300;
  const ch=a.channels||{},en=a.enabled||{};
  document.getElementById('awh').value=ch.webhook||'';document.getElementById('awhon').checked=en.webhook||false;
+ document.getElementById('amm').value=ch.mattermost||'';document.getElementById('ammon').checked=en.mattermost||false;
  document.getElementById('amail').value=ch.mail||'';document.getElementById('amaon').checked=en.mail||false;}
 async function asave(){const a={thresholds:{load1:+document.getElementById('al').value||2,mem:+document.getElementById('am').value||85,
   disk:+document.getElementById('ad').value||85,latency_ms:+document.getElementById('alat').value||300},
-  channels:{webhook:document.getElementById('awh').value.trim(),mail:document.getElementById('amail').value.trim()},
-  enabled:{webhook:document.getElementById('awhon').checked,mail:document.getElementById('amaon').checked}};
+  channels:{webhook:document.getElementById('awh').value.trim(),mattermost:document.getElementById('amm').value.trim(),mail:document.getElementById('amail').value.trim()},
+  enabled:{webhook:document.getElementById('awhon').checked,mattermost:document.getElementById('ammon').checked,mail:document.getElementById('amaon').checked}};
  const r=await fetch('/api/alert',{method:'POST',headers:{'Content-Type':'application/json','X-Fleet-Token':TOK},body:JSON.stringify(a)});
  const d=await r.json();fpToast(d.ok?'告警设置已保存':('ERR '+(d.error||'')),d.ok?'success':'error');}
 async function atest(){const r=await fetch('/api/notify/test',{method:'POST',headers:{'X-Fleet-Token':TOK}});const d=await r.json().catch(()=>({}));fpToast(d.ok?'已触发测试通知':'测试通知失败',d.ok?'success':'error');}
